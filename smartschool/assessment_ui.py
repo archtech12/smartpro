@@ -863,6 +863,13 @@ class GradeEntryPage(QWidget):
                     f"<td>{escape(result['display_percentage'])}%</td><td>{escape(result['grade_label'] or '')}</td>"
                     f"<td>{escape(result['remark'] or '')}</td></tr>"
                 )
+            overall = student.get("overall")
+            if overall and overall["complete"]:
+                rows.append(
+                    "<tr>" + f"<td>{escape(student['admission_no'])}</td><td>{escape(student['last_name'])}, {escape(student['first_name'])}</td>"
+                    f"<td><b>Overall average</b> ({overall['subject_count']} subjects)</td><td></td>"
+                    f"<td><b>{escape(overall['display_average'])}%</b></td><td></td><td></td></tr>"
+                )
         html = cls._sheet_html(
             "Master Result Sheet", data, "All assigned subjects",
             "<th>Admission No.</th><th>Student</th><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th><th>Remark</th>",
@@ -929,6 +936,11 @@ class GradeEntryPage(QWidget):
             for item in data["subjects"]
         )
         name = escape(f"{student['last_name']}, {student['first_name']}")
+        overall = data.get("overall")
+        overall_html = (
+            f"<p><b>Overall average:</b> {escape(overall['display_average'])}% across {overall['subject_count']} subjects</p>"
+            if overall and overall["complete"] else ""
+        )
         html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
           body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; }}
           h1 {{ color: #102a43; margin-bottom: 4px; }}
@@ -951,6 +963,7 @@ class GradeEntryPage(QWidget):
           Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}</div>
           <table><thead><tr><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th><th>Remark</th></tr></thead>
           <tbody>{rows}</tbody></table>
+          {overall_html}
           <div class="approval">Approved result card. Grades use the school's saved grading scale. Class rank is not included.</div>
           {GradeEntryPage._signature_html(profile)}
         </body></html>"""

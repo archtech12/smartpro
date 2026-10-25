@@ -683,3 +683,95 @@ def test_failed_v11_migration_rolls_back_and_keeps_v10_backup(tmp_path, monkeypa
     with sqlite3.connect(backups[0]) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+
+
+def _result(earned, possible, complete=True):
+    return {"complete": complete, "points_earned": earned, "points_possible": possible}
+
+
+def test_overall_average_is_equal_weight_mean_of_subject_percentages():
+    # 50% of 100 and 100% of 10: mean of percentages is 75; pooled points would give ~54.55.
+    average = db.calculate_overall_average([_result("50", "100"), _result("10", "10")])
+    assert average == {"complete": True, "subject_count": 2, "average": "75", "display_average": "75.00"}
+
+
+def test_overall_average_is_exact_and_rounds_half_up_only_for_display():
+    # 80.01% and 80% average exactly 80.005, which must display as 80.01 (half-up, no float drift).
+    average = db.calculate_overall_average([_result("8001", "10000"), _result("80", "100")])
+    assert average["average"] == "80.005"
+    assert average["display_average"] == "80.01"
+    thirds = db.calculate_overall_average([_result("1", "3"), _result("1", "3"), _result("1", "3")])
+    assert thirds["display_average"] == "33.33"
+    assert thirds["average"].startswith("33.3333333333")
+    assert db.calculate_overall_average([_result("0", "10")])["display_average"] == "0.00"
+    assert db.calculate_overall_average([_result("10", "10")])["display_average"] == "100.00"
+
+
+def test_overall_average_never_treats_incomplete_subject_as_zero():
+    average = db.calculate_overall_average([_result("100", "100"), _result("0", "100", complete=False)])
+    assert average == {"complete": False, "subject_count": 2, "average": None, "display_average": None}
+    with pytest.raises(ValueError, match="at least one subject"):
+        db.calculate_overall_average([])
+
+
+def _approve_second_subject(ids, first_max="20", second_max="30", scores=("20", "5")):
+    subject_id = db.add_row("Subjects", ["SCI", "Science", "Primary"], actor="admin")
+    assignment_id = db.save_class_subject_assignment(ids["session"], ids["class"], subject_id, None, "admin")
+    first = db.save_assessment_component(assignment_id, ids["term"], "Test", 1, first_max, "admin")
+    second = db.save_assessment_component(assignment_id, ids["term"], "Exam", 2, second_max, "admin")
+    snapshot_id, _ = db.save_assessment_scores(
+        assignment_id, ids["term"], {ids["enrollment"]: {first: scores[0], second: scores[1]}}, "admin",
+    )
+    return assignment_id, snapshot_id
+
+
+def test_report_card_and_master_sheet_include_overall_average_without_rank(grade_entry_db):
+    ids = grade_entry_db
+    english, _ = db.save_assessment_scores(
+        ids["assignment"], ids["term"],
+        {ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"}}, "admin",
+    )
+    db.approve_assessment_results(english, "admin")
+    science_assignment, science = _approve_second_subject(ids)  # 25 of 50 = 50%
+    # An unapproved subject blocks every overall figure instead of averaging what exists.
+    with pytest.raises(ValueError, match="not approved"):
+        db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
+    with pytest.raises(ValueError, match="not approved"):
+        db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
+    db.approve_assessment_results(science, "admin")
+    report = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
+    # English 80% and Science 50%: equal-weight mean 65.00 (pooled points 105/150 would be 70).
+    assert report["overall"] == {"complete": True, "subject_count": 2, "average": "65", "display_average": "65.00"}
+    master = db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
+    assert master["students"][0]["overall"] == report["overall"]
+    # Subject grades are unchanged and no class position is exposed anywhere.
+    assert [item["grade_label"] for item in report["subjects"]] == ["P", "P"]
+    assert not any("position" in key or "rank" in key for key in report)
+    assert not any("position" in key or "rank" in key for key in master["students"][0])
+
+
+def test_overall_average_is_rendered_on_report_card_and_master_sheet(grade_entry_db, monkeypatch):
+    pytest.importorskip("PyQt6")
+    from smartschool.assessment_ui import GradeEntryPage
+
+    ids = grade_entry_db
+    english, _ = db.save_assessment_scores(
+        ids["assignment"], ids["term"],
+        {ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"}}, "admin",
+    )
+    db.approve_assessment_results(english, "admin")
+    _, science = _approve_second_subject(ids)
+    db.approve_assessment_results(science, "admin")
+    report = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
+    card_html = GradeEntryPage._report_card_html(report)
+    assert "Overall average:</b> 65.00% across 2 subjects" in card_html
+    assert "Class rank is not included" in card_html
+    captured = []
+    monkeypatch.setattr(
+        GradeEntryPage, "_write_pdf", staticmethod(lambda html, path, logo_data=None, student_photo_data=None: captured.append(html))
+    )
+    GradeEntryPage._render_master_sheet_pdf(
+        db.load_master_sheet_data(ids["session"], ids["class"], ids["term"]), "unused.pdf"
+    )
+    assert "Overall average</b> (2 subjects)" in captured[0]
+    assert "<b>65.00%</b>" in captured[0]

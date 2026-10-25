@@ -12,6 +12,7 @@ import sqlite3
 from contextlib import closing, contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from fractions import Fraction
 from pathlib import Path
 from typing import Iterable
 from .student_details import normalize_optional_student_details
@@ -1102,6 +1103,38 @@ def calculate_assessment_result(components: list[dict], scores: dict[int, str], 
         "display_percentage": str(percentage.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
         "grade_label": grade["grade_label"] if grade else None,
         "remark": grade.get("remark", "") if grade else None,
+    }
+
+
+def calculate_overall_average(subject_results: list[dict]) -> dict:
+    """Return a student's overall average: the equal-weight mean of subject percentages.
+
+    Each subject contributes its own points percentage (earned ÷ possible × 100), so a
+    subject with a larger maximum does not count more than one with a smaller maximum.
+    The mean is computed exactly (no float or intermediate rounding) and rounded
+    half-up to two places only for display. A missing subject score is never treated
+    as zero: if any subject result is incomplete, no average is produced. This is a
+    separate figure from each subject's grade and implies no class position.
+    """
+    if not subject_results:
+        raise ValueError("Provide at least one subject result to calculate an overall average.")
+    count = len(subject_results)
+    if any(not item["complete"] for item in subject_results):
+        return {"complete": False, "subject_count": count, "average": None, "display_average": None}
+    total = sum(
+        (
+            Fraction(100) * Fraction(Decimal(item["points_earned"])) / Fraction(Decimal(item["points_possible"]))
+            for item in subject_results
+        ),
+        Fraction(0),
+    )
+    average = total / count
+    cents = (average * 100 + Fraction(1, 2)).__floor__()
+    return {
+        "complete": True,
+        "subject_count": count,
+        "average": _decimal_text(Decimal(average.numerator) / Decimal(average.denominator)),
+        "display_average": f"{cents // 100}.{cents % 100:02d}",
     }
 
 
@@ -2350,6 +2383,7 @@ def load_report_card_data(
             "class_name": class_row["class_name"],
             "section": class_row["section"],
             "subjects": subject_results,
+            "overall": calculate_overall_average(subject_results),
             "approval_status": "Approved",
             "school_profile": _school_profile_in_transaction(conn),
             "school_logo": _school_logo_in_transaction(conn),
@@ -2569,6 +2603,8 @@ def load_master_sheet_data(academic_session_id: int, class_id: int, term_id: int
                 by_enrollment[int(student["enrollment_id"])].setdefault("results", {})[
                     int(assignment["id"])
                 ] = student["result"]
+        for student in by_enrollment.values():
+            student["overall"] = calculate_overall_average(list(student["results"].values()))
         students = sorted(
             by_enrollment.values(),
             key=lambda item: (item["last_name"].casefold(), item["first_name"].casefold(), int(item["enrollment_id"])),
