@@ -34,7 +34,7 @@
 - Grade-entry headers show the configured component maxima and the calculated **Total**, **Max Points**, **Percent**, and **Grade**. Keep exported spreadsheet headers short and stable.
 - **No CGPA/GPA.** A subject result is points earned divided by maximum points, converted to a percentage, then mapped through the school's grade bands for that session and Primary/Secondary stage. Grade bands are school-configured; do not invent or seed a universal scale.
 - A blank required component is incomplete, not zero. Reject out-of-range values; never silently clamp imported scores. Use decimal arithmetic and preserve calculation precision.
-- Overall average is implemented on report cards and master-sheet rows as the equal-weight mean of subject percentages, only when every assigned subject is complete and approved (never counting missing as zero). It is separate from per-subject grades. Class position is not implemented: do not add ranking, an overall average grade, or use position to decide a subject grade until the school decides ties, exclusions, and ranking style (see `docs/ASSESSMENT_POLICY.md`).
+- Overall average is implemented on report cards and master-sheet rows as the equal-weight mean of subject percentages, only when every assigned subject is complete and approved (never counting missing as zero). It is separate from per-subject grades. Its grade comes from the exact average through bands only when every subject snapshot froze identical bands. Class position uses exact averages with competition ranking (equal averages share a position, next skipped) over the frozen approved roster and appears only when every subject is approved with matching rosters. Position never decides a subject grade; see `docs/ASSESSMENT_POLICY.md` items 8-9.
 - Draft scores require explicit saving. Approval locks complete results. Corrections after approval require administrator authority, a reason, and audit history. Teacher reads/writes must remain scoped to active assigned class-subjects.
 - Preserve the CSV roster import/template and approved PDF report, subject-sheet, and master-sheet workflows.
 
@@ -86,4 +86,4 @@
 - Qt UI coverage ran offscreen; a native Windows visual review was not performed.
 - Re-run the checks in the coding environment before relying on this checkpoint.
 
-The project docs may lag recent UI behavior. In particular, keep the CA/Exam first-use defaults and the current no-CGPA/overall-average/no-ranking behavior described consistently across the code, tests, README, and assessment policy.
+The project docs may lag recent UI behavior. In particular, keep the CA/Exam first-use defaults and the current no-CGPA/overall-average/class-position behavior described consistently across the code, tests, README, and assessment policy.

@@ -127,7 +127,7 @@ Schema v11 adds approval records that lock a complete class-subject/term result 
 
 ## Approved individual report card
 
-The Grade Entry screen can export an individual PDF report card. The service refuses generation unless every class subject assigned for the selected term has an approved, complete result for that student's frozen term roster. The report shows each subject's points, percentage, school-configured grade and remark, adds an overall average (equal-weight mean of subject percentages), and excludes rank. PDF generation was smoke-checked with synthetic data and produced a valid PDF file. Verification on 2026-10-22: `.venv\Scripts\python.exe -m pytest -q tests` — 75 passed; `.venv\Scripts\python.exe -m compileall -q main.py smartschool tests` — passed. Result sheets, master sheets, school branding/signatures, and native Windows visual review remain outstanding.
+The Grade Entry screen can export an individual PDF report card. The service refuses generation unless every class subject assigned for the selected term has an approved, complete result for that student's frozen term roster. The report shows each subject's points, percentage, school-configured grade and remark, adds an overall average with its grade and class position (ties share a position), shown only when the whole class is approved with matching rosters. PDF generation was smoke-checked with synthetic data and produced a valid PDF file. Verification on 2026-10-22: `.venv\Scripts\python.exe -m pytest -q tests` — 75 passed; `.venv\Scripts\python.exe -m compileall -q main.py smartschool tests` — passed. Result sheets, master sheets, school branding/signatures, and native Windows visual review remain outstanding.
 
 ## Class result and master sheets
 

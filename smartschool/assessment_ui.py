@@ -868,7 +868,8 @@ class GradeEntryPage(QWidget):
                 rows.append(
                     "<tr>" + f"<td>{escape(student['admission_no'])}</td><td>{escape(student['last_name'])}, {escape(student['first_name'])}</td>"
                     f"<td><b>Overall average</b> ({overall['subject_count']} subjects)</td><td></td>"
-                    f"<td><b>{escape(overall['display_average'])}%</b></td><td></td><td></td></tr>"
+                    f"<td><b>{escape(overall['display_average'])}%</b></td><td><b>{escape(overall['grade_label'] or '')}</b></td>"
+                    f"<td>{GradeEntryPage._position_html(student.get('position'))}</td></tr>"
                 )
         html = cls._sheet_html(
             "Master Result Sheet", data, "All assigned subjects",
@@ -894,7 +895,14 @@ class GradeEntryPage(QWidget):
           Class: {escape(data['class_name'])} {escape(data['section'])}<br>
           Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}<br>
           {subtitle}</div><table><thead><tr>{headings}</tr></thead><tbody>{rows}</tbody></table>
-          <p>Approved results. Grades use the school's saved grading scale. No class rank is included.</p>{signatures}</body></html>"""
+          <p>Approved results. Grades use the school's saved grading scale. Class position ranks the unrounded overall average; equal averages share a position.</p>{signatures}</body></html>"""
+
+    @staticmethod
+    def _position_html(position):
+        if not position:
+            return ""
+        tie = " (tied)" if position["tied"] else ""
+        return f"<b>Position {escape(position['position_text'])} of {position['of']}{tie}</b>"
 
     @staticmethod
     def _school_identity_html(profile, logo_present=False):
@@ -937,10 +945,14 @@ class GradeEntryPage(QWidget):
         )
         name = escape(f"{student['last_name']}, {student['first_name']}")
         overall = data.get("overall")
-        overall_html = (
-            f"<p><b>Overall average:</b> {escape(overall['display_average'])}% across {overall['subject_count']} subjects</p>"
-            if overall and overall["complete"] else ""
-        )
+        overall_html = ""
+        if overall and overall["complete"]:
+            grade = f" &nbsp; Grade: <b>{escape(overall['grade_label'])}</b> ({escape(overall['remark'] or '')})" if overall.get("grade_label") else ""
+            overall_html = f"<p><b>Overall average:</b> {escape(overall['display_average'])}% across {overall['subject_count']} subjects{grade}</p>"
+        position = data.get("position")
+        if position:
+            tie = " (tied)" if position["tied"] else ""
+            overall_html += f"<p><b>Class position:</b> {escape(position['position_text'])} of {position['of']}{tie}</p>"
         html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
           body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; }}
           h1 {{ color: #102a43; margin-bottom: 4px; }}
@@ -964,7 +976,7 @@ class GradeEntryPage(QWidget):
           <table><thead><tr><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th><th>Remark</th></tr></thead>
           <tbody>{rows}</tbody></table>
           {overall_html}
-          <div class="approval">Approved result card. Grades use the school's saved grading scale. Class rank is not included.</div>
+          <div class="approval">Approved result card. Grades use the school's saved grading scale. Class position ranks the unrounded overall average; equal averages share a position.</div>
           {GradeEntryPage._signature_html(profile)}
         </body></html>"""
         return html

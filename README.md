@@ -71,7 +71,7 @@ This is an **early offline-first rebuild**, not a completed enterprise release. 
 - Term-scoped assessment component setup with decimal maximum points
 - Administrator-only draft grade entry, complete-result approval/locking, and reasoned corrections with preserved score history
 - Grade entry CSV template export and validated draft score import matched by admission number
-- Individual report card PDF export from complete approved class-subject results, including an overall average (equal-weight mean of the subject percentages; shown only when every subject is complete and approved). Class position is not implemented; it needs school decisions on ties, exclusions, and ranking style
+- Individual report card PDF export from complete approved class-subject results, including the overall average (equal-weight mean of subject percentages), its grade from the school's bands, and class position (equal averages share a position, next skipped); shown only when every subject is complete and approved, and position only when the whole class is approved with matching rosters
 - Class report-card PDF export with one page per enrolled student, each containing that student's approved subject results
 - Optional student PNG/JPEG photos on report cards; school identity, logo, head and class-teacher signatory details are configured in School Profile
 - Read-only Student Profile from Student Register with photo, enrollment history, approved results, attendance counts, and fee invoice balances

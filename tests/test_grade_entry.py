@@ -689,10 +689,19 @@ def _result(earned, possible, complete=True):
     return {"complete": complete, "points_earned": earned, "points_possible": possible}
 
 
+BANDS = [
+    {"threshold": "0", "grade_label": "F", "remark": "Needs support"},
+    {"threshold": "50", "grade_label": "P", "remark": "Pass"},
+]
+
+
 def test_overall_average_is_equal_weight_mean_of_subject_percentages():
     # 50% of 100 and 100% of 10: mean of percentages is 75; pooled points would give ~54.55.
     average = db.calculate_overall_average([_result("50", "100"), _result("10", "10")])
-    assert average == {"complete": True, "subject_count": 2, "average": "75", "display_average": "75.00"}
+    assert average == {
+        "complete": True, "subject_count": 2, "average": "75", "display_average": "75.00",
+        "grade_label": None, "remark": None,
+    }
 
 
 def test_overall_average_is_exact_and_rounds_half_up_only_for_display():
@@ -708,64 +717,168 @@ def test_overall_average_is_exact_and_rounds_half_up_only_for_display():
 
 
 def test_overall_average_never_treats_incomplete_subject_as_zero():
-    average = db.calculate_overall_average([_result("100", "100"), _result("0", "100", complete=False)])
-    assert average == {"complete": False, "subject_count": 2, "average": None, "display_average": None}
+    average = db.calculate_overall_average([_result("100", "100"), _result("0", "100", complete=False)], BANDS)
+    assert average == {
+        "complete": False, "subject_count": 2, "average": None, "display_average": None,
+        "grade_label": None, "remark": None,
+    }
     with pytest.raises(ValueError, match="at least one subject"):
         db.calculate_overall_average([])
 
 
-def _approve_second_subject(ids, first_max="20", second_max="30", scores=("20", "5")):
+def test_overall_average_grade_uses_exact_average_at_band_boundary():
+    # 49.995% displays as 50.00 but is below the 50 threshold, so it must grade F.
+    just_below = db.calculate_overall_average([_result("49995", "100000")], BANDS)
+    assert just_below["display_average"] == "50.00"
+    assert just_below["grade_label"] == "F"
+    exact = db.calculate_overall_average([_result("50", "100")], BANDS)
+    assert (exact["grade_label"], exact["remark"]) == ("P", "Pass")
+
+
+def test_common_grade_bands_require_identical_subject_snapshots():
+    same = [dict(item) for item in BANDS]
+    assert db._common_grade_bands([BANDS, same]) == BANDS
+    changed = [dict(BANDS[0]), {"threshold": "45", "grade_label": "P", "remark": "Pass"}]
+    assert db._common_grade_bands([BANDS, changed]) is None
+    assert db._common_grade_bands([]) is None
+
+
+def test_ordinal_text_follows_english_suffix_rules():
+    expected = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 11: "11th", 12: "12th", 13: "13th",
+                21: "21st", 22: "22nd", 23: "23rd", 101: "101st", 111: "111th", 112: "112th"}
+    assert {number: db.ordinal_text(number) for number in expected} == expected
+    with pytest.raises(ValueError):
+        db.ordinal_text(0)
+
+
+def test_class_positions_use_competition_ranking_on_exact_averages():
+    from fractions import Fraction
+
+    positions = db.calculate_class_positions({
+        10: Fraction(65), 11: Fraction(130, 2), 12: Fraction(40),
+        13: Fraction(100001, 1000), 14: Fraction(100000, 1000),  # 100.001 and 100.000 both beat 65
+    })
+    assert [positions[key]["position"] for key in (13, 14, 10, 11, 12)] == [1, 2, 3, 3, 5]
+    assert positions[10]["tied"] and positions[11]["tied"]
+    assert not positions[13]["tied"]
+    assert positions[10]["position_text"] == "3rd" and positions[10]["of"] == 5
+    # Averages that only look equal after rounding are still ordered.
+    close = db.calculate_class_positions({1: Fraction(8001, 100), 2: Fraction(80005, 1000)})
+    assert close[1]["position"] == 1 and close[2]["position"] == 2
+
+
+def _enroll(ids, admission, last):
+    student_id = db.add_row("Students", [admission, "Synthetic", last, "", "", ""], actor="admin")
+    return db.create_student_enrollment(student_id, ids["class"], ids["session"], "2026-09-01", "admin")
+
+
+def _two_subject_class(ids):
+    """Three students, English (100 points) and Science (50 points), both approved.
+
+    Averages: Learner 65 (80% and 50%), Brown 65 (65% and 65%), Cole 40 (40% and 40%).
+    Learner and Brown tie on the average with different subject profiles.
+    """
+    brown = _enroll(ids, "S-502", "Brown")
+    cole = _enroll(ids, "S-503", "Cole")
+    learner = ids["enrollment"]
+    english = ids["components"]
+    snapshot, _ = db.save_assessment_scores(ids["assignment"], ids["term"], {
+        learner: {english[0]: "30", english[1]: "50"},
+        brown: {english[0]: "25", english[1]: "40"},
+        cole: {english[0]: "15", english[1]: "25"},
+    }, "admin")
+    db.approve_assessment_results(snapshot, "admin")
     subject_id = db.add_row("Subjects", ["SCI", "Science", "Primary"], actor="admin")
     assignment_id = db.save_class_subject_assignment(ids["session"], ids["class"], subject_id, None, "admin")
-    first = db.save_assessment_component(assignment_id, ids["term"], "Test", 1, first_max, "admin")
-    second = db.save_assessment_component(assignment_id, ids["term"], "Exam", 2, second_max, "admin")
-    snapshot_id, _ = db.save_assessment_scores(
-        assignment_id, ids["term"], {ids["enrollment"]: {first: scores[0], second: scores[1]}}, "admin",
-    )
-    return assignment_id, snapshot_id
+    first = db.save_assessment_component(assignment_id, ids["term"], "Test", 1, "20", "admin")
+    second = db.save_assessment_component(assignment_id, ids["term"], "Exam", 2, "30", "admin")
+    science, _ = db.save_assessment_scores(assignment_id, ids["term"], {
+        learner: {first: "20", second: "5"},
+        brown: {first: "20", second: "12.5"},
+        cole: {first: "8", second: "12"},
+    }, "admin")
+    return {"learner": learner, "brown": brown, "cole": cole, "science_snapshot": science}
 
 
-def test_report_card_and_master_sheet_include_overall_average_without_rank(grade_entry_db):
+def test_master_sheet_and_report_cards_rank_with_ties_and_average_grade(grade_entry_db):
     ids = grade_entry_db
-    english, _ = db.save_assessment_scores(
+    people = _two_subject_class(ids)
+    # While Science is unapproved nothing is averaged or ranked from partial data.
+    with pytest.raises(ValueError, match="not approved"):
+        db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+    with pytest.raises(ValueError, match="not approved"):
+        db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
+    db.approve_assessment_results(people["science_snapshot"], "admin")
+
+    master = db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
+    by_id = {int(student["enrollment_id"]): student for student in master["students"]}
+    assert by_id[people["learner"]]["overall"]["display_average"] == "65.00"
+    assert by_id[people["brown"]]["overall"]["display_average"] == "65.00"
+    assert by_id[people["cole"]]["overall"]["display_average"] == "40.00"
+    assert by_id[people["learner"]]["overall"]["grade_label"] == "P"
+    assert by_id[people["cole"]]["overall"]["grade_label"] == "F"
+    positions = {key: (value["position"]["position"], value["position"]["tied"]) for key, value in by_id.items()}
+    assert positions == {people["learner"]: (1, True), people["brown"]: (1, True), people["cole"]: (3, False)}
+    assert by_id[people["cole"]]["position"]["of"] == 3
+
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["cole"])
+    assert card["position"]["position_text"] == "3rd" and card["position"]["of"] == 3
+    assert card["overall"]["grade_label"] == "F"
+    assert [item["grade_label"] for item in card["subjects"]] == ["F", "F"]  # subject grades unchanged
+    cards = db.load_class_report_cards_data(ids["session"], ids["class"], ids["term"])["report_cards"]
+    assert {c["student"]["admission_no"]: c["position"]["position"] for c in cards} == {
+        "S-501": 1, "S-502": 1, "S-503": 3,
+    }
+
+
+def test_report_card_has_no_position_when_class_rosters_are_inconsistent(grade_entry_db):
+    ids = grade_entry_db
+    snapshot, _ = db.save_assessment_scores(
         ids["assignment"], ids["term"],
         {ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"}}, "admin",
     )
-    db.approve_assessment_results(english, "admin")
-    science_assignment, science = _approve_second_subject(ids)  # 25 of 50 = 50%
-    # An unapproved subject blocks every overall figure instead of averaging what exists.
-    with pytest.raises(ValueError, match="not approved"):
-        db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
-    with pytest.raises(ValueError, match="not approved"):
-        db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
+    db.approve_assessment_results(snapshot, "admin")
+    # A classmate joins before Science is scored, so the two frozen rosters differ.
+    joiner = _enroll(ids, "S-502", "Joiner")
+    subject_id = db.add_row("Subjects", ["SCI", "Science", "Primary"], actor="admin")
+    assignment_id = db.save_class_subject_assignment(ids["session"], ids["class"], subject_id, None, "admin")
+    first = db.save_assessment_component(assignment_id, ids["term"], "Test", 1, "20", "admin")
+    second = db.save_assessment_component(assignment_id, ids["term"], "Exam", 2, "30", "admin")
+    science, _ = db.save_assessment_scores(assignment_id, ids["term"], {
+        ids["enrollment"]: {first: "20", second: "5"}, joiner: {first: "10", second: "10"},
+    }, "admin")
     db.approve_assessment_results(science, "admin")
-    report = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
-    # English 80% and Science 50%: equal-weight mean 65.00 (pooled points 105/150 would be 70).
-    assert report["overall"] == {"complete": True, "subject_count": 2, "average": "65", "display_average": "65.00"}
-    master = db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
-    assert master["students"][0]["overall"] == report["overall"]
-    # Subject grades are unchanged and no class position is exposed anywhere.
-    assert [item["grade_label"] for item in report["subjects"]] == ["P", "P"]
-    assert not any("position" in key or "rank" in key for key in report)
-    assert not any("position" in key or "rank" in key for key in master["students"][0])
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
+    assert card["overall"]["display_average"] == "65.00"  # the student's own complete results still average
+    assert card["position"] is None  # but the class cannot be ranked from inconsistent rosters
+    with pytest.raises(ValueError, match="rosters differ"):
+        db.load_master_sheet_data(ids["session"], ids["class"], ids["term"])
 
 
-def test_overall_average_is_rendered_on_report_card_and_master_sheet(grade_entry_db, monkeypatch):
+def test_single_student_class_has_first_position_of_one(grade_entry_db):
+    ids = grade_entry_db
+    snapshot, _ = db.save_assessment_scores(
+        ids["assignment"], ids["term"],
+        {ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"}}, "admin",
+    )
+    db.approve_assessment_results(snapshot, "admin")
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
+    assert card["position"] == {"position": 1, "of": 1, "position_text": "1st", "tied": False}
+    assert card["overall"]["display_average"] == "80.00" and card["overall"]["grade_label"] == "P"
+
+
+def test_overall_average_and_position_are_rendered(grade_entry_db, monkeypatch):
     pytest.importorskip("PyQt6")
     from smartschool.assessment_ui import GradeEntryPage
 
     ids = grade_entry_db
-    english, _ = db.save_assessment_scores(
-        ids["assignment"], ids["term"],
-        {ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"}}, "admin",
-    )
-    db.approve_assessment_results(english, "admin")
-    _, science = _approve_second_subject(ids)
-    db.approve_assessment_results(science, "admin")
-    report = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
-    card_html = GradeEntryPage._report_card_html(report)
-    assert "Overall average:</b> 65.00% across 2 subjects" in card_html
-    assert "Class rank is not included" in card_html
+    people = _two_subject_class(ids)
+    db.approve_assessment_results(people["science_snapshot"], "admin")
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+    html = GradeEntryPage._report_card_html(card)
+    assert "Overall average:</b> 65.00% across 2 subjects" in html
+    assert "Grade: <b>P</b> (Pass)" in html
+    assert "Class position:</b> 1st of 3 (tied)" in html
     captured = []
     monkeypatch.setattr(
         GradeEntryPage, "_write_pdf", staticmethod(lambda html, path, logo_data=None, student_photo_data=None: captured.append(html))
@@ -775,3 +888,4 @@ def test_overall_average_is_rendered_on_report_card_and_master_sheet(grade_entry
     )
     assert "Overall average</b> (2 subjects)" in captured[0]
     assert "<b>65.00%</b>" in captured[0]
+    assert "Position 1st of 3 (tied)" in captured[0] and "Position 3rd of 3" in captured[0]

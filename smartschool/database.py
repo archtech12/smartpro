@@ -1106,21 +1106,12 @@ def calculate_assessment_result(components: list[dict], scores: dict[int, str], 
     }
 
 
-def calculate_overall_average(subject_results: list[dict]) -> dict:
-    """Return a student's overall average: the equal-weight mean of subject percentages.
-
-    Each subject contributes its own points percentage (earned ÷ possible × 100), so a
-    subject with a larger maximum does not count more than one with a smaller maximum.
-    The mean is computed exactly (no float or intermediate rounding) and rounded
-    half-up to two places only for display. A missing subject score is never treated
-    as zero: if any subject result is incomplete, no average is produced. This is a
-    separate figure from each subject's grade and implies no class position.
-    """
+def _overall_average_fraction(subject_results: list[dict]) -> Fraction | None:
+    """Exact equal-weight mean of subject percentages, or None if any subject is incomplete."""
     if not subject_results:
         raise ValueError("Provide at least one subject result to calculate an overall average.")
-    count = len(subject_results)
     if any(not item["complete"] for item in subject_results):
-        return {"complete": False, "subject_count": count, "average": None, "display_average": None}
+        return None
     total = sum(
         (
             Fraction(100) * Fraction(Decimal(item["points_earned"])) / Fraction(Decimal(item["points_possible"]))
@@ -1128,13 +1119,91 @@ def calculate_overall_average(subject_results: list[dict]) -> dict:
         ),
         Fraction(0),
     )
-    average = total / count
+    return total / len(subject_results)
+
+
+def _common_grade_bands(band_sets: list[list[dict]]) -> list[dict] | None:
+    """Return the grade bands shared by every subject snapshot, or None if they differ."""
+    def normal(bands):
+        return sorted(
+            (Decimal(str(band["threshold"])).normalize(), band["grade_label"], band.get("remark", "") or "")
+            for band in bands
+        )
+    if not band_sets or any(not bands for bands in band_sets):
+        return None
+    first = normal(band_sets[0])
+    return band_sets[0] if all(normal(bands) == first for bands in band_sets[1:]) else None
+
+
+def calculate_overall_average(subject_results: list[dict], bands: list[dict] | None = None) -> dict:
+    """Return a student's overall average: the equal-weight mean of subject percentages.
+
+    Each subject contributes its own points percentage (earned / possible x 100), so a
+    subject with a larger maximum does not count more than one with a smaller maximum.
+    The mean is computed exactly (no float or intermediate rounding) and rounded
+    half-up to two places only for display. A missing subject score is never treated
+    as zero: if any subject result is incomplete, no average is produced. When the
+    caller supplies one shared set of grade bands, the exact (unrounded) average is
+    also mapped to a grade; otherwise the grade is left empty rather than guessed.
+    """
+    average = _overall_average_fraction(subject_results)
+    count = len(subject_results)
+    if average is None:
+        return {
+            "complete": False, "subject_count": count, "average": None, "display_average": None,
+            "grade_label": None, "remark": None,
+        }
     cents = (average * 100 + Fraction(1, 2)).__floor__()
+    grade_label = remark = None
+    if bands:
+        matching = [
+            band for band in sorted(bands, key=lambda item: Decimal(str(item["threshold"])))
+            if Fraction(Decimal(str(band["threshold"]))) <= average
+        ]
+        if matching:
+            grade_label, remark = matching[-1]["grade_label"], matching[-1].get("remark", "") or ""
     return {
         "complete": True,
         "subject_count": count,
         "average": _decimal_text(Decimal(average.numerator) / Decimal(average.denominator)),
         "display_average": f"{cents // 100}.{cents % 100:02d}",
+        "grade_label": grade_label,
+        "remark": remark,
+    }
+
+
+def ordinal_text(number: int) -> str:
+    """Return 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, ... for a positive integer."""
+    if number < 1:
+        raise ValueError("A position must be a positive whole number.")
+    if 11 <= number % 100 <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def calculate_class_positions(averages: dict[int, Fraction]) -> dict[int, dict]:
+    """Rank students by exact overall average using standard competition ranking.
+
+    Students with exactly equal averages share a position and the next position is
+    skipped (1, 2, 2, 4). Ranking uses the unrounded average, so two students whose
+    averages only look equal after rounding are still ordered. Every student in the
+    supplied roster counts toward "of"; callers pass only complete, approved results.
+    """
+    ordered = sorted(averages.values(), reverse=True)
+    first_place: dict[Fraction, int] = {}
+    counts: dict[Fraction, int] = {}
+    for index, value in enumerate(ordered):
+        first_place.setdefault(value, index + 1)
+        counts[value] = counts.get(value, 0) + 1
+    total = len(ordered)
+    return {
+        key: {
+            "position": first_place[value], "of": total,
+            "position_text": ordinal_text(first_place[value]), "tied": counts[value] > 1,
+        }
+        for key, value in averages.items()
     }
 
 
@@ -2315,9 +2384,16 @@ def approve_assessment_results(snapshot_id: int, actor: str) -> tuple[str, str]:
 
 
 def load_report_card_data(
-    academic_session_id: int, class_id: int, term_id: int, enrollment_id: int
+    academic_session_id: int, class_id: int, term_id: int, enrollment_id: int,
+    class_positions: dict[int, dict] | None = None,
 ) -> dict:
-    """Load an individual report card only when every class subject is approved and complete."""
+    """Load an individual report card only when every class subject is approved and complete.
+
+    The card also carries the student's overall average and, when the whole class has
+    complete approved results with one consistent roster, the class position. Pass
+    ``class_positions`` (enrollment id -> position) to reuse positions already computed
+    for the class; otherwise they are derived here.
+    """
     with connection() as conn:
         assignment_rows = conn.execute(
             """SELECT x.id,s.subject_code,s.subject_name
@@ -2347,6 +2423,7 @@ def load_report_card_data(
         if enrollment is None:
             raise ValueError("Select a student enrolled in this class and academic session.")
         subject_results = []
+        subject_bands = []
         for assignment in assignment_rows:
             snapshot = conn.execute(
                 """SELECT p.id,p.policy_json,a.approved_by,a.approved_at
@@ -2370,12 +2447,13 @@ def load_report_card_data(
             result = calculate_assessment_result(policy["components"], scores, policy["bands"])
             if not result["complete"]:
                 raise ValueError(f"{assignment['subject_name']} result is incomplete and cannot be reported.")
+            subject_bands.append(policy["bands"])
             subject_results.append({
                 "subject_code": assignment["subject_code"],
                 "subject_name": assignment["subject_name"],
                 **result,
             })
-        return {
+        card = {
             "student": dict(enrollment),
             "academic_session": session["name"],
             "term_name": term["term_name"],
@@ -2383,18 +2461,29 @@ def load_report_card_data(
             "class_name": class_row["class_name"],
             "section": class_row["section"],
             "subjects": subject_results,
-            "overall": calculate_overall_average(subject_results),
+            "overall": calculate_overall_average(subject_results, _common_grade_bands(subject_bands)),
             "approval_status": "Approved",
             "school_profile": _school_profile_in_transaction(conn),
             "school_logo": _school_logo_in_transaction(conn),
         }
+    if class_positions is None:
+        try:
+            master = load_master_sheet_data(academic_session_id, class_id, term_id)
+            class_positions = {int(item["enrollment_id"]): item["position"] for item in master["students"]}
+        except ValueError:
+            class_positions = {}  # The class is not fully approved and consistent: no position is shown.
+    card["position"] = class_positions.get(int(enrollment_id))
+    return card
 
 
 def load_class_report_cards_data(academic_session_id: int, class_id: int, term_id: int) -> dict:
     """Load approved individual report cards for one class, requiring a consistent frozen roster."""
     master = load_master_sheet_data(academic_session_id, class_id, term_id)
+    positions = {int(student["enrollment_id"]): student["position"] for student in master["students"]}
     cards = [
-        load_report_card_data(academic_session_id, class_id, term_id, int(student["enrollment_id"]))
+        load_report_card_data(
+            academic_session_id, class_id, term_id, int(student["enrollment_id"]), class_positions=positions
+        )
         for student in master["students"]
     ]
     return {"report_cards": cards}
@@ -2537,6 +2626,7 @@ def _load_approved_subject_results(conn: sqlite3.Connection, assignment_id: int,
         "snapshot_id": int(snapshot["id"]),
         "approval": {"approved_by": snapshot["approved_by"], "approved_at": snapshot["approved_at"]},
         "roster_ids": set(roster_ids),
+        "bands": policy["bands"],
         "students": students,
     }
 
@@ -2603,8 +2693,15 @@ def load_master_sheet_data(academic_session_id: int, class_id: int, term_id: int
                 by_enrollment[int(student["enrollment_id"])].setdefault("results", {})[
                     int(assignment["id"])
                 ] = student["result"]
-        for student in by_enrollment.values():
-            student["overall"] = calculate_overall_average(list(student["results"].values()))
+        common_bands = _common_grade_bands([item["bands"] for item in subject_sets])
+        exact_averages = {}
+        for enrollment_id, student in by_enrollment.items():
+            student_results = list(student["results"].values())
+            student["overall"] = calculate_overall_average(student_results, common_bands)
+            exact_averages[enrollment_id] = _overall_average_fraction(student_results)
+        positions = calculate_class_positions(exact_averages)
+        for enrollment_id, student in by_enrollment.items():
+            student["position"] = positions[enrollment_id]
         students = sorted(
             by_enrollment.values(),
             key=lambda item: (item["last_name"].casefold(), item["first_name"].casefold(), int(item["enrollment_id"])),
