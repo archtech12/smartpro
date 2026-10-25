@@ -1,0 +1,146 @@
+"""Validated CSV templates and previews for draft assessment score entry."""
+
+from __future__ import annotations
+
+import csv
+import re
+from pathlib import Path
+
+from .database import validate_assessment_score
+
+
+def _column_code(value: object) -> str:
+    """Convert a subject or component label into a compact spreadsheet column code."""
+    return re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+
+
+def _component_headers(components: list[dict], subject_code: str) -> dict[int, str]:
+    subject = _column_code(subject_code) or "SUBJECT"
+    headers = {}
+    used = set()
+    for component in components:
+        name = _column_code(component.get("component_name"))
+        name = re.sub(r"_(SCORE|MARKS?)$", "", name) or f"COMPONENT_{int(component['id'])}"
+        header = f"{subject}_{name}"
+        if header in used:
+            header = f"{header}_{int(component['id'])}"
+        used.add(header)
+        headers[int(component["id"])] = header
+    return headers
+
+
+def _safe_spreadsheet_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + text
+    return text
+
+
+def write_score_template(
+    path: str | Path, students: list[dict], components: list[dict], subject_code: str = "SUBJECT"
+) -> None:
+    """Write the current class roster and any scores currently displayed in the editor."""
+    if not components:
+        raise ValueError("Assessment components are not configured.")
+    component_headers = _component_headers(components, subject_code)
+    headers = ["admission_no", "first_name", "last_name"] + list(component_headers.values())
+    with Path(path).open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        for student in students:
+            row = {
+                "admission_no": _safe_spreadsheet_text(student.get("admission_no", "")),
+                "first_name": _safe_spreadsheet_text(student.get("first_name", "")),
+                "last_name": _safe_spreadsheet_text(student.get("last_name", "")),
+            }
+            scores = student.get("scores", {})
+            for component in components:
+                row[component_headers[int(component["id"])]] = scores.get(int(component["id"]), "") or ""
+            writer.writerow(row)
+
+
+def preview_score_import(
+    path: str | Path, students: list[dict], components: list[dict], subject_code: str = "SUBJECT"
+) -> dict:
+    """Validate a whole score file without changing any application or database state.
+
+    Admission number is the only roster key. Blank score cells are omitted from the
+    returned updates, so importing a partially filled file cannot erase existing marks.
+    """
+    if not components:
+        raise ValueError("Assessment components are not configured.")
+    roster = {}
+    for student in students:
+        key = str(student["admission_no"]).strip().casefold()
+        if not key or key in roster:
+            raise ValueError("The selected class roster has missing or duplicate admission numbers.")
+        roster[key] = student
+
+    component_headers = _component_headers(components, subject_code)
+    expected = ["admission_no", "first_name", "last_name"] + list(component_headers.values())
+    component_by_header = {
+        component_headers[int(component["id"])]: component for component in components
+    }
+    try:
+        with Path(path).open("r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            headers = reader.fieldnames
+            if not headers:
+                raise ValueError("The CSV file is empty or has no header row.")
+            if len(headers) != len(set(headers)):
+                raise ValueError("The CSV file contains duplicate column headings.")
+            missing = [header for header in expected if header not in headers]
+            unknown = [header for header in headers if header not in expected]
+            if missing or unknown:
+                details = []
+                if missing:
+                    details.append("missing: " + ", ".join(missing))
+                if unknown:
+                    details.append("unexpected: " + ", ".join(unknown))
+                raise ValueError("CSV columns do not match this class, subject, and term (" + "; ".join(details) + ").")
+
+            updates = {}
+            seen = set()
+            score_count = 0
+            matched_rows = 0
+            for line_number, row in enumerate(reader, start=2):
+                if None in row:
+                    raise ValueError(f"Row {line_number} has more fields than the header.")
+                if not any((value or "").strip() for value in row.values()):
+                    continue
+                admission_no = (row.get("admission_no") or "").strip()
+                key = admission_no.casefold()
+                if not key:
+                    raise ValueError(f"Row {line_number} has scores but no admission number.")
+                if key in seen:
+                    raise ValueError(f"Admission number {admission_no!r} appears more than once.")
+                student = roster.get(key)
+                if student is None:
+                    raise ValueError(
+                        f"Admission number {admission_no!r} on row {line_number} is not in the selected class roster."
+                    )
+                seen.add(key)
+                matched_rows += 1
+                student_updates = {}
+                for header, component in component_by_header.items():
+                    value = (row.get(header) or "").strip()
+                    if value:
+                        try:
+                            student_updates[int(component["id"])] = validate_assessment_score(
+                                value, component["max_score"]
+                            )
+                        except ValueError as exc:
+                            raise ValueError(
+                                f"Row {line_number}, {header}: {exc}"
+                            ) from exc
+                if student_updates:
+                    updates[int(student["enrollment_id"])] = student_updates
+                    score_count += len(student_updates)
+    except UnicodeDecodeError as exc:
+        raise ValueError("The score file must be a UTF-8 CSV file.") from exc
+    except csv.Error as exc:
+        raise ValueError(f"The CSV file could not be read: {exc}") from exc
+
+    if not updates:
+        raise ValueError("No non-blank scores were found. Nothing was imported.")
+    return {"updates": updates, "matched_rows": matched_rows, "score_count": score_count}

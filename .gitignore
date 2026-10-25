@@ -1,0 +1,33 @@
+# Python environments and bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Test and tool output
+.pytest_cache/
+.pytest-*/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases, backups, logs, and imported school data
+*.db
+*.sqlite
+*.sqlite3
+*.db-*
+*.sqlite-*
+*.log
+/students.csv
+
+# Local secrets and per-machine settings
+.env
+.env.*
+!.env.example
+
+# Generated output and temporary/reference material
+/build/
+/dist/
+/tmp/
+/SmartSchool-main/

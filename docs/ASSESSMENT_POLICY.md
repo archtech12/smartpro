@@ -1,0 +1,38 @@
+# Generic assessment and result policy
+
+This document defines the generic assessment rule selected for the rebuild. It supports primary schools, secondary schools, and schools that operate both. It does not seed school-specific grade scales or remarks; each school configures thresholds per session and stage.
+
+## Current foundation
+
+Schema versions 5 through 7 introduced ordered decimal assessment components, explicit Primary/Secondary stages, and school-configured grade thresholds. Schema version 10 added draft score entry, exact decimal calculations, incomplete state for missing components, immutable component/grade-band snapshots, and append-only score-change history. Grade Entry supports a roster-specific CSV template and validated import preview. The import matches by admission number, validates every populated component score against the selected setup, leaves blank cells unchanged, and does not save until the user explicitly chooses Save draft scores. Schema version 18 adds explicit teacher-login links; administrators and linked teachers can enter drafts, with the database service restricting each teacher to assigned class-subjects. Teachers cannot approve or correct results. A school-authorized reopen workflow remains future work.
+
+The user-selected reference workflow uses CA and Exam columns with maxima 40 and 60. To match it, the rebuild creates these editable starter components the first time an administrator opens a class-subject and term with no components. The school can edit names and maxima in Assessment Setup before saving scores. This convenience default does not change the generic percentage formula or seed a grade scale. The rebuild must never clamp imported scores or treat missing work as zero.
+
+## Generic baseline
+
+1. **Support school levels as data.** A school can enable Primary, Secondary, or both, and may define its own stage labels. Every class must be explicitly assigned to a stage/level; do not infer level from labels such as “Grade 6”, “JSS 1”, or “Year 7”. Subject offerings and assessment policies can differ by stage. Existing classes need an explicit mapping when this field is introduced.
+2. **Scope policies to an academic context.** A school's assessment profile should be versioned and selectable by academic session and stage, with class/subject overrides only where the school needs them. A profile defines its component setup rules, score calculation, grading bands, and result lifecycle. Do not silently apply a secondary grading scale to primary classes or vice versa. Reports must identify the policy version used.
+3. **Component maxima define available points.** Each required component has a positive decimal maximum. A student's earned points must be between zero and that maximum, inclusive. Use decimal arithmetic from input through calculation.
+4. **Calculate a percentage from points earned.** For a complete result, calculate `100 × sum(earned points) ÷ sum(component maxima)`. This supports any number of components and maxima that do not add to 100, while keeping grade-band comparison on a 0–100 scale. Component-specific weights are not part of this first calculation model; a school that needs weighting beyond maximum points must choose that before implementation.
+5. **Missing is not zero.** A required component with no score leaves the result incomplete and not eligible for a final grade or rank. Do not infer zero, absence, exemption, or an excused mark from a blank cell. Separate absent/exempt states need a school-approved rule before they are introduced.
+6. **Keep calculation precision; round only for display.** Preserve exact decimal inputs and intermediate values. Display two decimal places using decimal `ROUND_HALF_UP`; use the unrounded percentage for grade-band selection.
+7. **Grade bands are school-configured.** Store lower-bound thresholds on the 0–100 percentage scale, scoped to academic session and stage. The first threshold must be 0; each threshold applies up to but not including the next threshold, and the last applies through 100. This represents complete, non-overlapping coverage. Do not seed a particular grading scale or remarks as universal defaults. The first saved score freezes the active component maxima and thresholds in an immutable snapshot.
+8. **No class ranking in the first result slice.** Ranking can expose incomplete or incomparable records and needs a school policy for ties, exclusions, and privacy. Defer it until that policy is explicit.
+9. **Protect finalized results.** Scores begin as editable drafts. Approval locks a complete class-subject/term result set. Any approved correction requires an administrator, a reason, and an append-only record of the old and new values, actor, and time. Do not overwrite the only copy of an approved value.
+10. **Keep teacher scope on every write.** Teachers may write only scores for their active class-subject assignment and the selected session/term. Administrators may manage setup and authorized corrections. UI visibility alone is not authorization; enforce scope in the database service transaction.
+
+## Deferred policy decisions
+
+- Confirm which levels the first school deployment will enable and its stage/class labels. The app design itself must support primary and secondary configurations, including both within one school.
+- Decide whether future releases need component weights beyond relative maxima.
+- Define whether optional or exempted components are needed; in the generic rule, every configured component is required and a missing score keeps the result incomplete.
+- Define how absence, excused absence, late work, and missing work should affect scores before adding those states.
+- Define who may submit, approve, reopen, and correct results, and whether approval applies per student, subject, class, or term.
+- Define a school-authorized process for reopening or replacing an approved result set; the current implementation keeps approved results locked and permits only reasoned score corrections.
+- Decide whether and when class ranking is required, including tie and exclusion rules.
+
+## Implementation order
+
+1. Implemented in schema version 18: administrators link a teacher login to one active staff record; teacher score reads and draft writes are checked against that teacher's class-subject assignments. Teachers cannot approve or correct approved results.
+2. Add an explicitly authorized reopen/replace workflow if the school requires it.
+3. Complete native Windows review for teacher and administrator grade-entry workflows.
