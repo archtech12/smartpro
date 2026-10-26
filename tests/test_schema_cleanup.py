@@ -8,7 +8,7 @@ def test_fresh_schema_does_not_install_question_bank(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "school.db")
     db.initialize()
     with db.connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='question_bank_items'"
         ).fetchone() is None
@@ -38,18 +38,22 @@ def test_v20_upgrade_removes_question_bank_and_adds_optional_student_details(tmp
         conn.execute(
             "INSERT INTO question_bank_items(id,prompt) VALUES(1,'synthetic old record')"
         )
+        # Minimal stand-ins for tables that exist in a real v20 database and are
+        # extended by later additive migrations.
+        conn.execute("CREATE TABLE school_profile(id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE fee_payments(id INTEGER PRIMARY KEY)")
         conn.execute("PRAGMA user_version=20")
 
     db.initialize()
 
     with db.connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='question_bank_items'"
         ).fetchone() is None
         assert conn.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone()[0] == 22
+        ).fetchone()[0] == db.SCHEMA_VERSION
         student = conn.execute(
             "SELECT admission_no,first_name,last_name,nin,date_of_birth,email FROM students"
         ).fetchone()

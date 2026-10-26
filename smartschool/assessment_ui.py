@@ -927,10 +927,34 @@ class GradeEntryPage(QWidget):
             columns.append(f"<td><div class='signline'>{escape(teacher)}</div></td>")
         return "<table class='signatures'><tr>" + "".join(columns) + "</tr></table>"
 
+    # Layout steps tried in order until one student fits on one A4 page:
+    # (font size in pt, cell padding in px, show the remark column).
+    REPORT_CARD_FIT_STEPS = (
+        (9, 4, True), (8, 3, True), (7, 2, True), (7, 2, False), (6, 2, False), (6, 1, False),
+    )
+
     @staticmethod
-    def _report_card_html(data, font_size=9):
+    def _card_signature_html(profile, settings, pad):
+        cells = []
+        for key, name_key, title_key, label, source in (
+            ("class_teacher_signature", "class_teacher_name", "class_teacher_title", "Class teacher", "teacher-signature"),
+            ("head_signature", "head_name", "head_title", "Head of school", "head-signature"),
+        ):
+            image = settings.get(key)
+            text = " ".join(part for part in (profile.get(name_key, ""), profile.get(title_key, "")) if part)
+            if not image and not text:
+                continue
+            picture = f"<img src='{source}'><br>" if image else "<br><br>"
+            cells.append(f"<td>{picture}<div class='signline'>{escape(text or label)}</div></td>")
+        if not cells:
+            return ""
+        return f"<table class='signatures'><tr>{''.join(cells)}</tr></table>"
+
+    @staticmethod
+    def _report_card_html(data, font_size=9, pad=4, show_remark=True):
         student = data["student"]
         profile = data.get("school_profile", {})
+        settings = data.get("report_settings", {})
         logo_data = data.get("school_logo")
         photo_data = student.get("photo_data")
         rows = "".join(
@@ -938,46 +962,62 @@ class GradeEntryPage(QWidget):
             f"<td>{escape(item['subject_code'])} — {escape(item['subject_name'])}</td>"
             f"<td>{escape(item['points_earned'])} / {escape(item['points_possible'])}</td>"
             f"<td>{escape(item['display_percentage'])}%</td>"
-            f"<td>{escape(item['grade_label'] or '')}</td>"
-            f"<td>{escape(item['remark'] or '')}</td>"
-            "</tr>"
+            f"<td><b>{escape(item['grade_label'] or '')}</b></td>"
+            + (f"<td>{escape(item['remark'] or '')}</td>" if show_remark else "")
+            + "</tr>"
             for item in data["subjects"]
         )
         name = escape(f"{student['last_name']}, {student['first_name']}")
+        stage = f" · {escape(data['educational_stage'])}" if data.get("educational_stage") else ""
         overall = data.get("overall")
-        overall_html = ""
-        if overall and overall["complete"]:
-            grade = f" &nbsp; Grade: <b>{escape(overall['grade_label'])}</b> ({escape(overall['remark'] or '')})" if overall.get("grade_label") else ""
-            overall_html = f"<p><b>Overall average:</b> {escape(overall['display_average'])}% across {overall['subject_count']} subjects{grade}</p>"
         position = data.get("position")
-        if position:
-            tie = " (tied)" if position["tied"] else ""
-            overall_html += f"<p><b>Class position:</b> {escape(position['position_text'])} of {position['of']}{tie}</p>"
+        style = settings.get("ranking_style", "position")
+        summary = ""
+        if overall and overall["complete"]:
+            parts = [f"<b>Overall average:</b> {escape(overall['display_average'])}% across {overall['subject_count']} subjects"]
+            if style == "average_grade":
+                if overall.get("grade_label"):
+                    parts.append(f"<b>Average grade:</b> {escape(overall['grade_label'])} ({escape(overall['remark'] or '')})")
+            elif position:
+                tie = " (tied)" if position["tied"] else ""
+                parts.append(f"<b>Class position:</b> {escape(position['position_text'])} of {position['of']}{tie}")
+            summary = "<p class='summary'>" + " &nbsp;·&nbsp; ".join(parts) + "</p>"
+        key = data.get("grade_key") or []
+        key_html = (
+            "<p class='key'><b>Grading key:</b> "
+            + " &nbsp; ".join(
+                f"{escape(item['grade_label'])} {escape(item['from_text'])}+"
+                + (f" ({escape(item['remark'])})" if item["remark"] else "")
+                for item in key
+            ) + "</p>" if key else ""
+        )
+        shows_position = style != "average_grade" and bool(position) and bool(overall and overall["complete"])
+        position_note = " Class position ranks the unrounded overall average; equal averages share a position." if shows_position else ""
+        remark_header = "<th>Remark</th>" if show_remark else ""
+        photo = "<td width='84' align='right'><img src='student-photo'></td>" if photo_data else ""
         html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
           body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; }}
-          h1 {{ color: #102a43; margin-bottom: 4px; }}
-          .meta {{ margin: 4px 0 10px; }}
+          h1 {{ color: #102a43; font-size:13pt; margin:2px 0; }}
           table {{ border-collapse: collapse; width: 100%; }}
-          th {{ background: #e8f0f6; text-align: left; }}
-          th, td {{ border: 1px solid #9fb3c8; padding: 4px; }}
-          .approval {{ margin-top: 10px; color: #486581; font-size: 8pt; }}
-          .school {{ text-align:center; margin-bottom:8px; }} .school h2 {{ margin:0; color:#102a43; }}
-          .school img {{ object-fit:contain; }}
-          .student-photo {{ margin: 4px 0 8px; }} .student-photo img {{ max-height:72px; max-width:72px; }}
-          .signatures {{ width:100%; margin-top:18px; }} .signatures td {{ width:50%; border:0; padding:4px 18px; }}
-          .signline {{ border-top:1px solid #486581; padding-top:4px; margin-top:18px; }}
+          table.info td {{ border:0; padding:1px; }}
+          table.grades th {{ background: #e8f0f6; text-align: left; }}
+          table.grades th, table.grades td {{ border: 1px solid #9fb3c8; padding: {pad}px; }}
+          .summary {{ margin:4px 0 2px; font-size:{font_size + 1}pt; }} .key {{ margin:2px 0; font-size:{max(font_size - 1, 5)}pt; color:#486581; }}
+          .approval {{ margin-top: 3px; color: #486581; font-size:{max(font_size - 1, 5)}pt; }}
+          .school {{ text-align:center; margin-bottom:4px; }} .school h2 {{ margin:0; color:#102a43; }}
+          .signatures {{ width:100%; margin-top:4px; }} .signatures td {{ width:50%; border:0; padding:2px 18px; }}
+          .signline {{ border-top:1px solid #486581; padding-top:2px; margin-top:2px; }}
         </style></head><body>
           {GradeEntryPage._school_identity_html(profile, bool(logo_data))}
           <h1>Student Report Card</h1>
-          {f"<div class='student-photo'><img src='student-photo'></div>" if photo_data else ""}
-          <div class="meta"><b>{name}</b> &nbsp; Admission No.: {escape(student['admission_no'])}<br>
-          Class: {escape(data['class_name'])} {escape(data['section'])}<br>
-          Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}</div>
-          <table><thead><tr><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th><th>Remark</th></tr></thead>
+          <table class="info"><tr><td><b>{name}</b> &nbsp; Admission No.: {escape(student['admission_no'])}<br>
+          Class: {escape(data['class_name'])} {escape(data['section'])}{stage}<br>
+          Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}</td>{photo}</tr></table>
+          <table class="grades"><thead><tr><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th>{remark_header}</tr></thead>
           <tbody>{rows}</tbody></table>
-          {overall_html}
-          <div class="approval">Approved result card. Grades use the school's saved grading scale. Class position ranks the unrounded overall average; equal averages share a position.</div>
-          {GradeEntryPage._signature_html(profile)}
+          {summary}{key_html}
+          <div class="approval">Approved result card. Grades use the school's saved grading scale.{position_note}</div>
+          {GradeEntryPage._card_signature_html(profile, settings, pad)}
         </body></html>"""
         return html
 
@@ -987,12 +1027,13 @@ class GradeEntryPage(QWidget):
 
     @classmethod
     def _render_class_report_cards_pdf(cls, data, path):
+        """Write one A4 page per student; each page shrinks its layout until the whole card fits."""
         cards = data.get("report_cards", [])
         if not cards:
             raise ValueError("The class has no approved student report cards to export.")
         writer = QPdfWriter(path)
         writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-        writer.setPageMargins(QMarginsF(12, 12, 12, 12), QPageLayout.Unit.Millimeter)
+        writer.setPageMargins(QMarginsF(10, 10, 10, 10), QPageLayout.Unit.Millimeter)
         page_size = writer.pageLayout().paintRect(QPageLayout.Unit.Point).size()
         painter = QPainter(writer)
         pdf_scale = writer.resolution() / 72.0
@@ -1002,25 +1043,36 @@ class GradeEntryPage(QWidget):
                 writer.newPage()
             document = QTextDocument()
             document.setPageSize(page_size)
-            logo_data = card.get("school_logo")
-            photo_data = card["student"].get("photo_data")
-            photo_url = f"student-photo-{index}"
-            for key, image_data in (("school-logo", logo_data), (photo_url, photo_data)):
+            settings = card.get("report_settings", {})
+            sources = {
+                "school-logo": (card.get("school_logo"), 192, 128),
+                f"student-photo-{index}": (card["student"].get("photo_data"), 80, 80),
+                f"teacher-signature-{index}": (settings.get("class_teacher_signature"), 150, 44),
+                f"head-signature-{index}": (settings.get("head_signature"), 150, 44),
+            }
+            for key, (image_data, width, height) in sources.items():
                 if image_data:
                     image = QImage.fromData(image_data)
                     if image.isNull():
-                        raise ValueError("A saved school logo or student photo is not a readable image.")
-                    image = image.scaled(192 if key == "school-logo" else 96, 128 if key == "school-logo" else 96,
-                                         Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                        raise ValueError("A saved school logo, signature, or student photo is not a readable image.")
+                    image = image.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                     document.addResource(QTextDocument.ResourceType.ImageResource, QUrl(key), image)
-            for font_size in (9, 8, 7, 6):
-                page_html = cls._report_card_html(card, font_size).replace("src='student-photo'", f"src='{photo_url}'")
+            fitted = False
+            for font_size, pad, show_remark in cls.REPORT_CARD_FIT_STEPS:
+                page_html = (
+                    cls._report_card_html(card, font_size, pad, show_remark)
+                    .replace("src='student-photo'", f"src='student-photo-{index}'")
+                    .replace("src='teacher-signature'", f"src='teacher-signature-{index}'")
+                    .replace("src='head-signature'", f"src='head-signature-{index}'")
+                )
                 document.setHtml(page_html)
                 if document.documentLayout().documentSize().height() <= page_size.height():
+                    fitted = True
                     break
-            if document.documentLayout().documentSize().height() > page_size.height():
+            if not fitted:
+                painter.end()
                 raise ValueError(
-                    f"{card['student']['first_name']} {card['student']['last_name']}'s report card has too many rows to fit on one page."
+                    f"{card['student']['first_name']} {card['student']['last_name']}'s report card has too many subjects to fit on one page."
                 )
             document.drawContents(painter)
         painter.end()

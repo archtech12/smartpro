@@ -867,25 +867,144 @@ def test_single_student_class_has_first_position_of_one(grade_entry_db):
     assert card["overall"]["display_average"] == "80.00" and card["overall"]["grade_label"] == "P"
 
 
-def test_overall_average_and_position_are_rendered(grade_entry_db, monkeypatch):
+def test_report_card_data_carries_stage_key_style_and_signatures(grade_entry_db):
+    ids = grade_entry_db
+    people = _two_subject_class(ids)
+    db.approve_assessment_results(people["science_snapshot"], "admin")
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+    assert card["educational_stage"] == "Primary"  # from the class's explicit stage, not its name
+    assert card["grade_key"] == [
+        {"grade_label": "P", "remark": "Pass", "from_text": "50"},
+        {"grade_label": "F", "remark": "Needs support", "from_text": "0"},
+    ]
+    assert card["report_settings"] == {"ranking_style": "position", "head_signature": None, "class_teacher_signature": None}
+    png = b"\x89PNG\r\n\x1a\n" + b"synthetic"
+    db.save_school_profile({}, "admin", report_ranking_style="average_grade", head_signature=png)
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+    assert card["report_settings"]["ranking_style"] == "average_grade"
+    assert card["report_settings"]["head_signature"] == png
+
+
+def _approved_card(ids, people):
+    db.approve_assessment_results(people["science_snapshot"], "admin")
+    return db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+
+
+def test_report_card_html_follows_the_ranking_style_and_shows_stage_and_key(grade_entry_db):
     pytest.importorskip("PyQt6")
     from smartschool.assessment_ui import GradeEntryPage
 
     ids = grade_entry_db
     people = _two_subject_class(ids)
-    db.approve_assessment_results(people["science_snapshot"], "admin")
-    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+    card = _approved_card(ids, people)
+    position_html = GradeEntryPage._report_card_html(card)
+    assert "Overall average:</b> 65.00% across 2 subjects" in position_html
+    assert "Class position:</b> 1st of 3 (tied)" in position_html and "Average grade" not in position_html
+    assert "Class: Grade 5 A · Primary" in position_html
+    assert "Grading key:</b> P 50+ (Pass) &nbsp; F 0+ (Needs support)" in position_html
+    assert "Class position ranks the unrounded overall average" in position_html
+    card["report_settings"] = {**card["report_settings"], "ranking_style": "average_grade"}
+    grade_html = GradeEntryPage._report_card_html(card)
+    assert "Average grade:</b> P (Pass)" in grade_html
+    assert "Class position" not in grade_html and "ranks the unrounded" not in grade_html
+
+
+def test_report_card_html_omits_position_when_class_cannot_be_ranked_and_marks_signatures(grade_entry_db):
+    pytest.importorskip("PyQt6")
+    from smartschool.assessment_ui import GradeEntryPage
+
+    ids = grade_entry_db
+    people = _two_subject_class(ids)
+    card = _approved_card(ids, people)
+    card["position"] = None
+    card["report_settings"] = {**card["report_settings"], "head_signature": b"x", "class_teacher_signature": b"y"}
+    db_profile = {**card["school_profile"], "head_name": "A. Head", "head_title": "Principal"}
+    card["school_profile"] = db_profile
     html = GradeEntryPage._report_card_html(card)
-    assert "Overall average:</b> 65.00% across 2 subjects" in html
-    assert "Grade: <b>P</b> (Pass)" in html
-    assert "Class position:</b> 1st of 3 (tied)" in html
-    captured = []
-    monkeypatch.setattr(
-        GradeEntryPage, "_write_pdf", staticmethod(lambda html, path, logo_data=None, student_photo_data=None: captured.append(html))
+    assert "Class position" not in html and "Overall average:</b> 65.00%" in html
+    assert "<img src='teacher-signature'>" in html and "<img src='head-signature'>" in html
+    assert "A. Head Principal" in html and "Class teacher</div>" in html  # a signature without a typed name gets a label
+
+
+def test_report_card_layout_steps_shrink_and_drop_the_remark_column_last(grade_entry_db):
+    pytest.importorskip("PyQt6")
+    from smartschool.assessment_ui import GradeEntryPage
+
+    ids = grade_entry_db
+    people = _two_subject_class(ids)
+    card = _approved_card(ids, people)
+    steps = GradeEntryPage.REPORT_CARD_FIT_STEPS
+    assert steps[0] == (9, 4, True)  # the roomy default is tried first
+    sizes = [(font, pad) for font, pad, _remark in steps]
+    assert sizes == sorted(sizes, reverse=True)  # every step is the same size or tighter than the last
+    assert steps[-1][0] >= 6  # never smaller than 6 pt, so the card stays readable
+    assert [remark for *_rest, remark in steps] == [True, True, True, False, False, False]
+    roomy = GradeEntryPage._report_card_html(card, *steps[0])
+    tight = GradeEntryPage._report_card_html(card, *steps[-1])
+    assert "<th>Remark</th>" in roomy and "<th>Remark</th>" not in tight
+    assert "padding: 1px" in tight and "padding: 4px" in roomy
+
+
+def _class_with_many_subjects(ids, subject_count):
+    """Add subjects so the class has ``subject_count`` approved subjects for two students."""
+    second_student = db.add_row("Students", ["S-502", "Synthetic", "Second", "", "", ""], actor="admin")
+    second = db.create_student_enrollment(second_student, ids["class"], ids["session"], "2026-09-01", "admin")
+    first = ids["enrollment"]
+    snapshot, _ = db.save_assessment_scores(ids["assignment"], ids["term"], {
+        first: {ids["components"][0]: "30", ids["components"][1]: "50"},
+        second: {ids["components"][0]: "25", ids["components"][1]: "45"},
+    }, "admin")
+    db.approve_assessment_results(snapshot, "admin")
+    for number in range(subject_count - 1):
+        subject_id = db.add_row("Subjects", [f"X{number:02d}", f"Extra subject {number:02d} with a long descriptive name", "Primary"], actor="admin")
+        assignment = db.save_class_subject_assignment(ids["session"], ids["class"], subject_id, None, "admin")
+        test = db.save_assessment_component(assignment, ids["term"], "Test", 1, "40", "admin")
+        exam = db.save_assessment_component(assignment, ids["term"], "Exam", 2, "60", "admin")
+        snapshot, _ = db.save_assessment_scores(assignment, ids["term"], {
+            first: {test: "20", exam: "30"}, second: {test: "35", exam: "40"},
+        }, "admin")
+        db.approve_assessment_results(snapshot, "admin")
+
+
+@pytest.mark.parametrize("subject_count", [12, 25, 32])
+def test_each_student_report_card_fits_one_page_even_with_many_subjects(grade_entry_db, subject_count):
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtPdf import QPdfDocument
+    from smartschool.assessment_ui import GradeEntryPage
+
+    ids = grade_entry_db
+    app = QApplication.instance() or QApplication([])
+    _class_with_many_subjects(ids, subject_count)
+    png = _synthetic_png(ids["tmp"] / "mark.png")
+    db.save_school_profile(
+        {"school_name": "Synthetic School", "address": "1 Example Road", "head_name": "A. Head", "head_title": "Principal",
+         "class_teacher_name": "T. Teacher", "class_teacher_title": "Class teacher"},
+        "admin", png, head_signature=png, class_teacher_signature=png,
     )
-    GradeEntryPage._render_master_sheet_pdf(
-        db.load_master_sheet_data(ids["session"], ids["class"], ids["term"]), "unused.pdf"
-    )
-    assert "Overall average</b> (2 subjects)" in captured[0]
-    assert "<b>65.00%</b>" in captured[0]
-    assert "Position 1st of 3 (tied)" in captured[0] and "Position 3rd of 3" in captured[0]
+    data = db.load_class_report_cards_data(ids["session"], ids["class"], ids["term"])
+    assert len(data["report_cards"]) == 2 and all(len(c["subjects"]) == subject_count for c in data["report_cards"])
+    path = str(ids["tmp"] / f"cards-{subject_count}.pdf")
+    GradeEntryPage._render_class_report_cards_pdf(data, path)
+    pdf = QPdfDocument(None)
+    assert pdf.load(path) == QPdfDocument.Error.None_
+    assert pdf.pageCount() == 2  # one student per page: never two students on a page, never a spill-over page
+    assert app is not None
+
+
+def test_report_card_with_impossibly_many_subjects_is_refused_not_split(grade_entry_db):
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from smartschool.assessment_ui import GradeEntryPage
+
+    ids = grade_entry_db
+    QApplication.instance() or QApplication([])
+    _class_with_many_subjects(ids, 3)
+    data = db.load_class_report_cards_data(ids["session"], ids["class"], ids["term"])
+    template = data["report_cards"][0]["subjects"][0]
+    for card in data["report_cards"]:
+        card["subjects"] = [dict(template, subject_code=f"Z{n}", subject_name=f"Subject {n}") for n in range(400)]
+    with pytest.raises(ValueError, match="too many subjects to fit on one page"):
+        GradeEntryPage._render_class_report_cards_pdf(data, str(ids["tmp"] / "too-many.pdf"))

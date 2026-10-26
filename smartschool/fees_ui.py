@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QInputDialog,
     QPushButton,
@@ -35,6 +37,7 @@ from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
 from . import database as db
 from .fee_statement import compare_statement_rows, load_statement_csv
+from . import fee_documents
 from .workers import BackgroundTask
 
 
@@ -101,6 +104,231 @@ class RecordPaymentDialog(QDialog):
         )
 
 
+def _write_html_pdf(html: str, path: str, logo_data=None) -> str:
+    """Write an HTML document to an A4 PDF, embedding the optional school logo."""
+    writer = QPdfWriter(path)
+    writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+    document = QTextDocument()
+    if logo_data:
+        image = QImage.fromData(logo_data)
+        if image.isNull():
+            raise ValueError("The saved school logo is not a readable image.")
+        image = image.scaled(180, 140, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        document.addResource(QTextDocument.ResourceType.ImageResource, QUrl("school-logo"), image)
+    document.setHtml(html)
+    document.print(writer)
+    return path
+
+
+class StudentStatementDialog(QDialog):
+    """A student's statement through the active term, with lump-sum payment and PDF printing.
+
+    Unpaid balances from earlier terms stay on the statement until paid, and a lump-sum
+    payment is applied to the oldest unpaid invoices first under one receipt.
+    """
+
+    def __init__(self, student_id: int, username: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Student fee statement")
+        self.setMinimumSize(820, 560)
+        self.student_id = student_id
+        self.username = username
+        self.changed = False
+        self._data = None
+        self._busy = False
+        self._request = 0
+        self._workers = {}
+        self._pool = QThreadPool.globalInstance()
+        layout = QVBoxLayout(self)
+        self.heading = QLabel("Loading statement…")
+        self.heading.setObjectName("heading")
+        layout.addWidget(self.heading)
+        self.summary = QLabel("")
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Session / Term", "Class", "Fees", "Billed", "Paid", "Balance", "Status"])
+        configure_table_headers(self.table)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        layout.addWidget(self.table, 1)
+        form = QFormLayout()
+        self.amount = QLineEdit()
+        self.amount.setPlaceholderText("Amount received; applied to the oldest unpaid fees first")
+        self.method = QComboBox()
+        for code, label in (
+            ("cash", "Cash"), ("bank_transfer", "Bank transfer"),
+            ("mobile_money", "Mobile money"), ("cheque", "Cheque"), ("other", "Other"),
+        ):
+            self.method.addItem(label, code)
+        self.received_on = QDateEdit(QDate.currentDate())
+        self.received_on.setCalendarPopup(True)
+        self.received_on.setDisplayFormat("yyyy-MM-dd")
+        self.reference = QLineEdit()
+        self.reference.setMaxLength(100)
+        self.reference.setPlaceholderText("Optional transaction reference")
+        form.addRow("Lump-sum amount", self.amount)
+        form.addRow("Payment method", self.method)
+        form.addRow("Payment date", self.received_on)
+        form.addRow("Reference", self.reference)
+        layout.addLayout(form)
+        actions = QHBoxLayout()
+        self.pay_button = QPushButton("Record lump-sum payment")
+        self.pay_button.setObjectName("primary")
+        self.pay_button.clicked.connect(self.pay)
+        self.print_button = QPushButton("Print statement (PDF)")
+        self.print_button.clicked.connect(self.print_statement)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.accept)
+        actions.addWidget(self.pay_button)
+        actions.addWidget(self.print_button)
+        actions.addStretch()
+        actions.addWidget(self.close_button)
+        layout.addLayout(actions)
+        self.status = QLabel("")
+        layout.addWidget(self.status)
+        self._set_actions()
+        self.refresh()
+
+    def _set_actions(self):
+        has_data = self._data is not None
+        owing = has_data and Decimal(self._data["total_outstanding"]) > 0
+        self.pay_button.setEnabled(not self._busy and owing)
+        self.amount.setEnabled(not self._busy and owing)
+        self.print_button.setEnabled(not self._busy and has_data)
+
+    def _run(self, operation, callback):
+        if self._busy:
+            return
+        self._busy = True
+        self._set_actions()
+        self._request += 1
+        request = self._request
+        worker = BackgroundTask(request, operation)
+        worker.signals.finished.connect(callback)
+        self._workers[request] = worker
+        self._pool.start(worker)
+
+    def refresh(self):
+        self.status.setText("Loading statement…")
+        self._run(lambda: db.load_student_fee_statement(self.student_id, self.username), self._loaded)
+
+    def _loaded(self, request, data, error):
+        self._workers.pop(request, None)
+        self._busy = False
+        if error is not None:
+            self.heading.setText("Could not load the statement")
+            self.status.setText(str(error))
+            self._set_actions()
+            return
+        self._data = data
+        student = data["student"]
+        self.heading.setText(f"{student['last_name']}, {student['first_name']} · {student['admission_no']}")
+        self.summary.setText(
+            f"Active term: {data['current_session']} · {data['current_term']}.  Billed {data['total_billed']}  ·  "
+            f"Paid {data['total_paid']}  ·  Outstanding {data['total_outstanding']}.  "
+            "Unpaid balances from earlier terms stay here until they are paid."
+        )
+        self.table.setRowCount(0)
+        for row, item in enumerate(data["items"]):
+            self.table.insertRow(row)
+            term = f"{item['session_name']} · {item['term_order']}. {item['term_name']}"
+            if item["carried_over"] and item["status"] != "Paid":
+                term += " (carried forward)"
+            values = (
+                term, f"{item['class_name']} {item['section']}".strip(), item["fees"],
+                item["total_amount_text"], item["paid_amount_text"], item["balance_amount_text"], item["status"],
+            )
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QTableWidgetItem(value))
+        self.status.setText(
+            "No issued invoices up to the active term." if not data["items"] else
+            (f"{data['later_term_invoice_count']} issued invoice(s) for later terms are not included."
+             if data["later_term_invoice_count"] else "")
+        )
+        self._set_actions()
+
+    def pay(self):
+        amount = self.amount.text().strip()
+        if not amount:
+            QMessageBox.information(self, "Enter payment amount", "Enter the amount received before saving.")
+            return
+        received_on = self.received_on.date().toString("yyyy-MM-dd")
+        method, reference = self.method.currentData(), self.reference.text().strip()
+        self.status.setText("Recording payment…")
+        self._run(
+            lambda: db.record_fee_lump_sum_payment(
+                self.student_id, amount, received_on, method, reference, self.username
+            ),
+            self._paid,
+        )
+
+    def _paid(self, request, result, error):
+        self._workers.pop(request, None)
+        self._busy = False
+        if error is not None:
+            self.status.setText("Payment was not recorded")
+            self._set_actions()
+            QMessageBox.warning(self, "Could not record payment", str(error))
+            return
+        self.changed = True
+        self.amount.clear()
+        self.reference.clear()
+        number = result["lump_sum_number"]
+        answer = QMessageBox.question(
+            self, "Payment recorded",
+            f"Lump-sum receipt {number} was recorded for {result['total_amount_text']}.\n\nSave the receipt as a PDF now?",
+        )
+        if answer == QMessageBox.StandardButton.Yes and self._export_receipt(number):
+            return
+        self.refresh()
+
+    def _ask_pdf_path(self, title: str, suggested: str):
+        path, _selected_filter = QFileDialog.getSaveFileName(self, title, suggested, "PDF files (*.pdf)")
+        if not path:
+            return None
+        return path if path.casefold().endswith(".pdf") else path + ".pdf"
+
+    def _export_receipt(self, number: str) -> bool:
+        path = self._ask_pdf_path("Save lump-sum receipt", f"{number}.pdf")
+        if path is None:
+            return False
+
+        def build():
+            data = db.load_fee_lump_sum_receipt_data(number, self.username)
+            return _write_html_pdf(fee_documents.lump_sum_receipt_html(data), path, data.get("school_logo"))
+
+        self.status.setText("Preparing receipt PDF…")
+        self._run(build, self._pdf_saved)
+        return True
+
+    def print_statement(self):
+        if self._data is None:
+            return
+        student = self._data["student"]
+        path = self._ask_pdf_path("Save statement of account", f"statement-{student['admission_no']}.pdf")
+        if path is None:
+            return
+        data = self._data
+        self.status.setText("Preparing statement PDF…")
+        self._run(
+            lambda: _write_html_pdf(fee_documents.statement_html(data), path, data.get("school_logo")),
+            self._pdf_saved,
+        )
+
+    def _pdf_saved(self, request, path, error):
+        self._workers.pop(request, None)
+        self._busy = False
+        if error is not None:
+            self.status.setText("The PDF was not saved")
+            self._set_actions()
+            QMessageBox.warning(self, "Could not save PDF", str(error))
+            return
+        self.status.setText(f"Saved {path}")
+        self.refresh()
+
+
 class FeeInvoicePage(QWidget):
     """Manage draft and issued invoices, payments, receipts, and reversals."""
 
@@ -156,6 +384,11 @@ class FeeInvoicePage(QWidget):
             "Select an issued invoice with a balance in Student Balances before recording a payment."
         )
         self.payment_button.clicked.connect(self.record_payment)
+        self.statement_button = QPushButton("Statement / lump sum")
+        self.statement_button.setToolTip(
+            "Select a student's invoice to see everything owed through the active term, pay it in one lump sum, or print the statement."
+        )
+        self.statement_button.clicked.connect(self.open_statement)
         for button in (self.preview_button, self.generate_button):
             actions.addWidget(button)
         layout.addWidget(actions)
@@ -201,6 +434,7 @@ class FeeInvoicePage(QWidget):
         self.invoice_search_status = QLabel("")
         invoice_heading.addWidget(self.invoice_search_status)
         invoice_heading.addWidget(self.payment_button)
+        invoice_heading.addWidget(self.statement_button)
         student_layout.addLayout(invoice_heading)
         self.invoice_table = QTableWidget(0, 9)
         self.invoice_table.setHorizontalHeaderLabels(["Invoice Number", "Admission Number", "Student Name", "Class", "Academic Term", "Invoice Amount", "Amount Paid", "Balance Due", "Invoice Status"])
@@ -261,6 +495,7 @@ class FeeInvoicePage(QWidget):
             self.cancel_button.setEnabled(False)
             self.issue_button.setEnabled(False)
             self.payment_button.setEnabled(False)
+            self.statement_button.setEnabled(False)
             self.reverse_button.setEnabled(False)
             self.export_receipt_button.setEnabled(False)
         self.session.currentIndexChanged.connect(self._session_changed)
@@ -475,6 +710,7 @@ class FeeInvoicePage(QWidget):
         self.issue_button.setEnabled(enabled and bool(batch and batch["status"] == "draft"))
         invoice = next((x for x in self._data["invoices"] if x["id"] == self._selected_invoice), None)
         self.payment_button.setEnabled(enabled and bool(invoice and invoice["is_issued"] and invoice["balance_amount_text"] != "0"))
+        self.statement_button.setEnabled(enabled and invoice is not None)
         payment = next((x for x in self._data["payments"] if x["id"] == self._selected_payment), None)
         self.reverse_button.setEnabled(enabled and bool(payment and payment["net_amount_text"] != "0"))
         self.export_receipt_button.setEnabled(not self._busy and payment is not None)
@@ -576,6 +812,19 @@ class FeeInvoicePage(QWidget):
             lambda: db.record_fee_payment(int(invoice["id"]), amount, received_on, method, reference, self.username),
             "Recording payment…",
         )
+
+    def open_statement(self):
+        invoice = next((x for x in self._data["invoices"] if x["id"] == self._selected_invoice), None)
+        if invoice is None or not self.is_admin:
+            return
+        try:
+            dialog = StudentStatementDialog(int(invoice["student_id"]), self.username, self)
+            dialog.exec()
+        except Exception as exc:  # a dialog problem must not close the application
+            QMessageBox.warning(self, "Could not open the statement", str(exc))
+            return
+        if dialog.changed:
+            self.refresh()
 
     def reverse_payment(self):
         payment = next((x for x in self._data["payments"] if x["id"] == self._selected_payment), None)
@@ -1052,7 +1301,19 @@ class FeeSetupPage(QWidget):
         self.due_on.setEnabled(False)
         self.due_date_enabled.toggled.connect(self.due_on.setEnabled)
         form.addRow("Academic session", self.session)
-        form.addRow("Class and section", self.class_section)
+        self.class_scope = QComboBox()
+        self.class_scope.addItem("One class", "one")
+        self.class_scope.addItem("All classes", "all")
+        self.class_scope.addItem("Selected classes", "selected")
+        self.class_scope.setToolTip("Apply a new fee to one class, every class, or only the classes you tick.")
+        self.class_list = QListWidget()
+        self.class_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.class_list.setMaximumHeight(130)
+        self.class_label = QLabel("Class and section")
+        self.class_list_label = QLabel("Choose classes")
+        form.addRow("Applies to", self.class_scope)
+        form.addRow(self.class_label, self.class_section)
+        form.addRow(self.class_list_label, self.class_list)
         form.addRow("Term", self.term)
         form.addRow("Fee type", self.fee_type)
         form.addRow("Amount", self.amount)
@@ -1062,6 +1323,8 @@ class FeeSetupPage(QWidget):
         form.addRow("Due date (optional)", due_date_row)
         layout.addLayout(form)
         self.session.currentIndexChanged.connect(self._session_changed)
+        self.class_scope.currentIndexChanged.connect(self._scope_changed)
+        self._scope_changed()
 
         schedule_actions = QHBoxLayout()
         self.save_schedule_button = QPushButton("Add fee schedule")
@@ -1093,7 +1356,7 @@ class FeeSetupPage(QWidget):
         if not self.is_admin:
             for widget in (
                 self.type_name, self.type_description, self.add_type_button, self.type_status_button,
-                self.session, self.class_section, self.term, self.fee_type, self.amount,
+                self.session, self.class_scope, self.class_list, self.class_section, self.term, self.fee_type, self.amount,
                 self.due_date_enabled, self.due_on,
                 self.save_schedule_button, self.clear_schedule_button, self.schedule_status_button,
             ):
@@ -1153,6 +1416,13 @@ class FeeSetupPage(QWidget):
             lambda row: row["name"] if row["is_active"] else f"{row['name']} (archived)",
             int(old_type) if old_type is not None else None,
         )
+        ticked = set(self._selected_class_ids())
+        self.class_list.clear()
+        for row in data["classes"]:
+            item = QListWidgetItem(f"{row['class_name']} {row['section']}".strip())
+            item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+            self.class_list.addItem(item)
+            item.setSelected(int(row["id"]) in ticked)
         self._fill_terms(int(old_term) if old_term is not None else None)
         self._render_types()
         self._render_schedules()
@@ -1161,6 +1431,19 @@ class FeeSetupPage(QWidget):
             if self.is_admin else "Fee setup is view-only for this account."
         )
         self._set_actions()
+
+    def _selected_class_ids(self):
+        return [
+            int(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.class_list.selectedItems()
+        ]
+
+    def _scope_changed(self, *_args):
+        scope = self.class_scope.currentData()
+        self.class_label.setVisible(scope == "one")
+        self.class_section.setVisible(scope == "one")
+        self.class_list_label.setVisible(scope == "selected")
+        self.class_list.setVisible(scope == "selected")
 
     def _fill_terms(self, selected_id=None):
         session_id = self.session.currentData()
@@ -1227,6 +1510,7 @@ class FeeSetupPage(QWidget):
             (item for item in self._data["schedules"] if item["id"] == self._selected_schedule_id), None
         )
         if schedule:
+            self.class_scope.setCurrentIndex(0)
             self._fill_combo(self.session, "Select session", self._data["sessions"],
                 lambda item: f"{item['name']}  (Current)" if item["is_current"] else item["name"],
                 schedule["academic_session_id"])
@@ -1267,13 +1551,17 @@ class FeeSetupPage(QWidget):
         self.type_status_button.setEnabled(editable and selected_type is not None)
         self.session.setEnabled(editable)
         self.class_section.setEnabled(editable)
+        self.class_scope.setEnabled(editable and self._selected_schedule_id is None)
+        self.class_list.setEnabled(editable)
         self.term.setEnabled(editable)
         self.fee_type.setEnabled(editable)
         self.amount.setEnabled(editable)
         self.due_date_enabled.setEnabled(editable)
         self.due_on.setEnabled(editable and self.due_date_enabled.isChecked())
+        multi_class = self._selected_schedule_id is None and self.class_scope.currentData() != "one"
+        classes_available = self.class_list.count() > 0 if multi_class else self.class_section.count() > 1
         self.save_schedule_button.setEnabled(
-            editable and self.session.count() > 1 and self.class_section.count() > 1
+            editable and self.session.count() > 1 and classes_available
             and self.term.count() > 1 and self.fee_type.count() > 1
         )
         self.clear_schedule_button.setEnabled(editable)
@@ -1337,6 +1625,22 @@ class FeeSetupPage(QWidget):
         )
 
     def save_schedule(self):
+        scope = self.class_scope.currentData()
+        if self._selected_schedule_id is None and scope != "one":
+            class_ids = None if scope == "all" else self._selected_class_ids()
+            if scope == "selected" and not class_ids:
+                QMessageBox.information(self, "Choose classes", "Tick at least one class, or choose All classes.")
+                return
+            several = (
+                self.session.currentData(), self.term.currentData(), self.fee_type.currentData(), class_ids,
+                self.amount.text(),
+                self.due_on.date().toString("yyyy-MM-dd") if self.due_date_enabled.isChecked() else "",
+            )
+            self._start_write(
+                lambda: db.save_fee_schedules_for_classes(*several, self.username),
+                "Saving fee schedules for the chosen classes…",
+            )
+            return
         values = (
             self.session.currentData(), self.class_section.currentData(), self.term.currentData(),
             self.fee_type.currentData(), self.amount.text(),

@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 24
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -682,6 +682,31 @@ def _migration_22(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 22")
 
 
+def _migration_23(conn: sqlite3.Connection) -> None:
+    """Add the report ranking style and optional report signature images to the school profile."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(school_profile)")}
+    if "report_ranking_style" not in columns:
+        conn.execute(
+            "ALTER TABLE school_profile ADD COLUMN report_ranking_style TEXT NOT NULL DEFAULT 'position' "
+            "CHECK(report_ranking_style IN ('position','average_grade'))"
+        )
+    for name in ("head_signature", "class_teacher_signature"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE school_profile ADD COLUMN {name} BLOB")
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(23)")
+    conn.execute("PRAGMA user_version = 23")
+
+
+def _migration_24(conn: sqlite3.Connection) -> None:
+    """Group the per-invoice payments of one lump-sum receipt without touching existing payments."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fee_payments)")}
+    if "lump_sum_number" not in columns:
+        conn.execute("ALTER TABLE fee_payments ADD COLUMN lump_sum_number TEXT CHECK(lump_sum_number IS NULL OR length(lump_sum_number)<=40)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fee_payments_lump_sum ON fee_payments(lump_sum_number) WHERE lump_sum_number IS NOT NULL")
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(24)")
+    conn.execute("PRAGMA user_version = 24")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -738,6 +763,10 @@ def initialize() -> None:
                 _migration_21(conn)
             elif next_version == 22:
                 _migration_22(conn)
+            elif next_version == 23:
+                _migration_23(conn)
+            elif next_version == 24:
+                _migration_24(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()
@@ -787,9 +816,46 @@ def _school_logo_in_transaction(conn: sqlite3.Connection) -> bytes | None:
 
 
 _LOGO_UNCHANGED = object()
+REPORT_RANKING_STYLES = {
+    "position": "Show class position (1st, 2nd…)",
+    "average_grade": "Show overall average grade",
+}
 
 
-def save_school_profile(profile: dict[str, str], actor: str, logo_data=_LOGO_UNCHANGED) -> None:
+def _report_settings_in_transaction(conn: sqlite3.Connection) -> dict:
+    row = conn.execute(
+        "SELECT report_ranking_style,head_signature,class_teacher_signature FROM school_profile WHERE id=1"
+    ).fetchone()
+    return {
+        "ranking_style": row["report_ranking_style"],
+        "head_signature": bytes(row["head_signature"]) if row["head_signature"] else None,
+        "class_teacher_signature": bytes(row["class_teacher_signature"]) if row["class_teacher_signature"] else None,
+    }
+
+
+def load_report_settings() -> dict:
+    """Return the report ranking style and the optional head / class-teacher signature images."""
+    with connection() as conn:
+        return _report_settings_in_transaction(conn)
+
+
+def _validated_image(data, label: str):
+    if data is None:
+        return None
+    if not isinstance(data, bytes):
+        raise ValueError(f"{label} must be a validated PNG or JPEG image.")
+    if len(data) > 1_000_000:
+        raise ValueError(f"{label} must be 1 MB or smaller.")
+    if not (data.startswith(b"\x89PNG\r\n\x1a\n") or data.startswith(b"\xff\xd8\xff")):
+        raise ValueError(f"{label} must be a PNG or JPEG image.")
+    return data
+
+
+def save_school_profile(
+    profile: dict[str, str], actor: str, logo_data=_LOGO_UNCHANGED, *,
+    report_ranking_style=_LOGO_UNCHANGED, head_signature=_LOGO_UNCHANGED,
+    class_teacher_signature=_LOGO_UNCHANGED,
+) -> None:
     values = {}
     for field, max_length in SCHOOL_PROFILE_FIELDS:
         value = profile.get(field, "")
@@ -803,25 +869,32 @@ def save_school_profile(profile: dict[str, str], actor: str, logo_data=_LOGO_UNC
         raise ValueError("Enter a valid email address, or leave it blank.")
     if values["school_type"] not in {"", "primary", "secondary", "combined"}:
         raise ValueError("Choose Primary, Secondary, or Primary and Secondary for the school type.")
-    if logo_data is not _LOGO_UNCHANGED:
-        if logo_data is not None and not isinstance(logo_data, bytes):
-            raise ValueError("School logo must be a validated PNG or JPEG image.")
-        if logo_data is not None:
-            if len(logo_data) > 1_000_000:
-                raise ValueError("School logo must be 1 MB or smaller.")
-            if not (logo_data.startswith(b"\x89PNG\r\n\x1a\n") or logo_data.startswith(b"\xff\xd8\xff")):
-                raise ValueError("School logo must be a PNG or JPEG image.")
+    optional_images = (
+        ("logo_data", logo_data, "School logo"),
+        ("head_signature", head_signature, "Head of school signature"),
+        ("class_teacher_signature", class_teacher_signature, "Class teacher signature"),
+    )
+    for _column, image, label in optional_images:
+        if image is not _LOGO_UNCHANGED:
+            _validated_image(image, label)
+    if report_ranking_style is not _LOGO_UNCHANGED and report_ranking_style not in REPORT_RANKING_STYLES:
+        raise ValueError("Choose class position or overall average grade for the report ranking style.")
     with connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         actor = _require_admin(conn, actor)
         columns = ",".join(f"{field}=?" for field, _limit in SCHOOL_PROFILE_FIELDS)
-        logo_clause = ",logo_data=?" if logo_data is not _LOGO_UNCHANGED else ""
         params = [values[field] for field, _limit in SCHOOL_PROFILE_FIELDS]
-        if logo_data is not _LOGO_UNCHANGED:
-            params.append(logo_data)
+        extra_clause = ""
+        for column, image, _label in optional_images:
+            if image is not _LOGO_UNCHANGED:
+                extra_clause += f",{column}=?"
+                params.append(image)
+        if report_ranking_style is not _LOGO_UNCHANGED:
+            extra_clause += ",report_ranking_style=?"
+            params.append(report_ranking_style)
         params.append(actor)
         conn.execute(
-            f"UPDATE school_profile SET {columns}{logo_clause},updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",
+            f"UPDATE school_profile SET {columns}{extra_clause},updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",
             params,
         )
         _audit_in_transaction(conn, actor, "UPDATE", "school_profile", 1)
@@ -1133,6 +1206,20 @@ def _common_grade_bands(band_sets: list[list[dict]]) -> list[dict] | None:
         return None
     first = normal(band_sets[0])
     return band_sets[0] if all(normal(bands) == first for bands in band_sets[1:]) else None
+
+
+def grade_key_entries(bands: list[dict] | None) -> list[dict]:
+    """Return the school's grade bands, highest first, for the printed grading key."""
+    if not bands:
+        return []
+    ordered = sorted(bands, key=lambda item: Decimal(str(item["threshold"])), reverse=True)
+    return [
+        {
+            "grade_label": band["grade_label"], "remark": band.get("remark", "") or "",
+            "from_text": _decimal_text(Decimal(str(band["threshold"]))),
+        }
+        for band in ordered
+    ]
 
 
 def calculate_overall_average(subject_results: list[dict], bands: list[dict] | None = None) -> dict:
@@ -2408,7 +2495,7 @@ def load_report_card_data(
             "SELECT name FROM academic_sessions WHERE id=?", (academic_session_id,)
         ).fetchone()
         class_row = conn.execute(
-            "SELECT class_name,section FROM classes WHERE id=?", (class_id,)
+            "SELECT class_name,section,educational_stage FROM classes WHERE id=?", (class_id,)
         ).fetchone()
         if not term or not session or not class_row or term["academic_session_id"] != academic_session_id:
             raise ValueError("Select a valid session, class, and term.")
@@ -2463,6 +2550,9 @@ def load_report_card_data(
             "subjects": subject_results,
             "overall": calculate_overall_average(subject_results, _common_grade_bands(subject_bands)),
             "approval_status": "Approved",
+            "educational_stage": EDUCATIONAL_STAGES.get(class_row["educational_stage"], ""),
+            "grade_key": grade_key_entries(_common_grade_bands(subject_bands)),
+            "report_settings": _report_settings_in_transaction(conn),
             "school_profile": _school_profile_in_transaction(conn),
             "school_logo": _school_logo_in_transaction(conn),
         }
@@ -3989,6 +4079,88 @@ def set_fee_type_active(fee_type_id: int, is_active: bool, actor: str) -> None:
         _audit_in_transaction(conn, actor, "ACTIVATE" if is_active else "ARCHIVE", "fee_types", fee_type_id)
 
 
+def _validated_fee_amount_and_due(amount, due_on) -> tuple[str, str | None]:
+    amount_value = _decimal_value(amount, "Fee amount")
+    if amount_value <= 0:
+        raise ValueError("Fee amount must be greater than zero.")
+    if not isinstance(due_on, str):
+        raise ValueError("Due date must be blank or a valid YYYY-MM-DD date.")
+    due_on = due_on.strip()
+    if due_on:
+        try:
+            if date.fromisoformat(due_on).isoformat() != due_on:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("Due date must be blank or a valid YYYY-MM-DD date.") from exc
+    return _decimal_text(amount_value), (due_on or None)
+
+
+def save_fee_schedules_for_classes(
+    academic_session_id: int, term_id: int, fee_type_id: int, class_ids,
+    amount, due_on: str, actor: str,
+) -> list[int]:
+    """Create one fee schedule per class in a single transaction.
+
+    ``class_ids=None`` means every class in the school. The whole request is rejected,
+    with the affected classes named, if any selected class already has a schedule for
+    this fee type, session and term, so existing schedules are never overwritten.
+    """
+    ids = (academic_session_id, term_id, fee_type_id)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ids):
+        raise ValueError("Select an academic session, term, and active fee type.")
+    amount_text, due_text = _validated_fee_amount_and_due(amount, due_on)
+    if class_ids is not None:
+        if isinstance(class_ids, (str, bytes)) or not hasattr(class_ids, "__iter__"):
+            raise ValueError("Select at least one class, or choose all classes.")
+        class_ids = list(dict.fromkeys(class_ids))
+        if not class_ids or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in class_ids):
+            raise ValueError("Select at least one class, or choose all classes.")
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = _require_admin(conn, actor)
+        if not conn.execute("SELECT 1 FROM academic_sessions WHERE id=?", (academic_session_id,)).fetchone():
+            raise ValueError("Academic session was not found.")
+        term = conn.execute("SELECT academic_session_id FROM terms WHERE id=?", (term_id,)).fetchone()
+        if term is None or int(term["academic_session_id"]) != academic_session_id:
+            raise ValueError("Select a term from the selected academic session.")
+        fee_type = conn.execute("SELECT is_active FROM fee_types WHERE id=?", (fee_type_id,)).fetchone()
+        if fee_type is None or not fee_type["is_active"]:
+            raise ValueError("Select an active fee type.")
+        if class_ids is None:
+            class_ids = [int(row[0]) for row in conn.execute("SELECT id FROM classes ORDER BY class_name,section,id")]
+            if not class_ids:
+                raise ValueError("Add at least one class before setting a fee for all classes.")
+        labels = {}
+        for class_id in class_ids:
+            row = conn.execute("SELECT class_name,section FROM classes WHERE id=?", (class_id,)).fetchone()
+            if row is None:
+                raise ValueError("A selected class was not found.")
+            labels[class_id] = f"{row['class_name']} {row['section']}".strip()
+        taken = [
+            labels[class_id] for class_id in class_ids
+            if conn.execute(
+                "SELECT 1 FROM fee_schedules WHERE academic_session_id=? AND class_id=? AND term_id=? AND fee_type_id=?",
+                (academic_session_id, class_id, term_id, fee_type_id),
+            ).fetchone()
+        ]
+        if taken:
+            raise ValueError(
+                "A schedule for this fee type, session, and term already exists for: "
+                + ", ".join(taken) + ". Deselect those classes or edit the existing schedules."
+            )
+        created = []
+        for class_id in class_ids:
+            cursor = conn.execute(
+                """INSERT INTO fee_schedules
+                   (academic_session_id,class_id,term_id,fee_type_id,amount_text,due_on,updated_by)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (academic_session_id, class_id, term_id, fee_type_id, amount_text, due_text, actor),
+            )
+            created.append(int(cursor.lastrowid))
+            _audit_in_transaction(conn, actor, "CREATE", "fee_schedules", created[-1])
+        return created
+
+
 def save_fee_schedule(
     academic_session_id: int,
     class_id: int,
@@ -4246,9 +4418,10 @@ def load_fee_invoice_data(
                 placeholders = ",".join("?" for _ in batch_ids)
                 invoices = [dict(row) for row in conn.execute(
                     f"""SELECT i.id,i.batch_id,i.invoice_number,i.admission_no_snapshot,i.student_name_snapshot,
-                               i.total_amount_text,i.review_required,i.created_at,
+                               i.total_amount_text,i.review_required,i.created_at,e.student_id,
                                CASE WHEN x.id IS NULL THEN 0 ELSE 1 END AS is_issued
                         FROM fee_invoices i JOIN fee_invoice_batches b ON b.id=i.batch_id
+                        JOIN student_enrollments e ON e.id=i.enrollment_id
                         LEFT JOIN fee_invoice_issues x ON x.batch_id=i.batch_id
                         WHERE i.batch_id IN ({placeholders})
                         ORDER BY i.batch_id DESC,i.admission_no_snapshot COLLATE NOCASE""", batch_ids
@@ -4256,7 +4429,7 @@ def load_fee_invoice_data(
                 scope_clause = " AND ".join(conditions)
                 payments = [dict(row) for row in conn.execute(
                     """SELECT p.id,p.invoice_id,p.receipt_number,p.amount_text,p.received_on,p.method,
-                              p.reference,p.received_by,p.created_at,i.invoice_number,
+                              p.reference,p.received_by,p.created_at,p.lump_sum_number,i.invoice_number,
                               i.admission_no_snapshot,i.student_name_snapshot
                        FROM fee_payments p JOIN fee_invoices i ON i.id=p.invoice_id
                        JOIN fee_invoice_batches b ON b.id=i.batch_id
@@ -4360,6 +4533,212 @@ def record_fee_payment(
         )
         _audit_in_transaction(conn, actor, "RECEIVE", "fee_payments", int(cursor.lastrowid))
         return receipt_number
+
+
+def _invoice_net_paid(conn: sqlite3.Connection, invoice_id: int) -> Decimal:
+    gross = sum((_decimal_value(row[0], "Payment amount") for row in conn.execute(
+        "SELECT amount_text FROM fee_payments WHERE invoice_id=?", (invoice_id,)
+    )), Decimal("0"))
+    reversed_total = sum((_decimal_value(row[0], "Reversal amount") for row in conn.execute(
+        """SELECT r.amount_text FROM fee_payment_reversals r
+           JOIN fee_payments p ON p.id=r.payment_id WHERE p.invoice_id=?""", (invoice_id,)
+    )), Decimal("0"))
+    return gross - reversed_total
+
+
+def _fee_statement_in_transaction(conn: sqlite3.Connection, student_id: int) -> dict:
+    """Issued invoices for one student through the active term, oldest first, with balances.
+
+    Earlier unpaid terms (and sessions) stay on the statement until paid, so a debt is
+    carried forward while a fully paid term adds nothing. Invoices for terms after the
+    active term are counted but not included in what is outstanding now.
+    """
+    student = conn.execute(
+        "SELECT id,admission_no,first_name,last_name,is_active FROM students WHERE id=?", (student_id,)
+    ).fetchone()
+    if student is None:
+        raise ValueError("Select an existing student.")
+    session = conn.execute("SELECT id,name,starts_on FROM academic_sessions WHERE is_current=1").fetchone()
+    term = None
+    if session is not None:
+        term = conn.execute(
+            "SELECT id,term_name,term_order FROM terms WHERE academic_session_id=? AND is_current=1", (session["id"],)
+        ).fetchone()
+    if session is None or term is None:
+        raise ValueError("Set the current academic session and term in Academic Calendar before using fee statements.")
+    rows = conn.execute(
+        """SELECT i.id,i.invoice_number,i.total_amount_text,b.academic_session_id,
+                  a.name AS session_name,a.starts_on,t.term_name,t.term_order,c.class_name,c.section
+           FROM fee_invoices i JOIN student_enrollments e ON e.id=i.enrollment_id
+           JOIN fee_invoice_batches b ON b.id=i.batch_id
+           JOIN fee_invoice_issues x ON x.batch_id=b.id
+           JOIN academic_sessions a ON a.id=b.academic_session_id
+           JOIN terms t ON t.id=b.term_id JOIN classes c ON c.id=b.class_id
+           WHERE e.student_id=? ORDER BY a.starts_on,t.term_order,i.id""",
+        (student_id,),
+    ).fetchall()
+    items, later = [], 0
+    billed = paid_total = outstanding = Decimal("0")
+    for row in rows:
+        same_session = int(row["academic_session_id"]) == int(session["id"])
+        if (not same_session and row["starts_on"] > session["starts_on"]) or (
+            same_session and int(row["term_order"]) > int(term["term_order"])
+        ):
+            later += 1
+            continue
+        total = _decimal_value(row["total_amount_text"], "Invoice total")
+        paid = _invoice_net_paid(conn, int(row["id"]))
+        balance = total - paid
+        fees = ", ".join(line[0] for line in conn.execute(
+            "SELECT fee_type_name_snapshot FROM fee_invoice_lines WHERE invoice_id=? ORDER BY id", (row["id"],)
+        ))
+        items.append({
+            "invoice_id": int(row["id"]), "invoice_number": row["invoice_number"],
+            "session_name": row["session_name"], "term_name": row["term_name"],
+            "term_order": int(row["term_order"]), "class_name": row["class_name"], "section": row["section"],
+            "fees": fees, "total_amount_text": _decimal_text(total), "paid_amount_text": _decimal_text(paid),
+            "balance_amount_text": _decimal_text(balance),
+            "status": "Paid" if balance <= 0 else ("Part paid" if paid > 0 else "Unpaid"),
+            "carried_over": not (same_session and int(row["term_order"]) == int(term["term_order"])),
+        })
+        billed += total
+        paid_total += paid
+        outstanding += balance
+    return {
+        "student": {
+            "id": int(student["id"]), "admission_no": student["admission_no"],
+            "first_name": student["first_name"], "last_name": student["last_name"],
+        },
+        "current_session": session["name"], "current_term": term["term_name"],
+        "items": items, "later_term_invoice_count": later,
+        "total_billed": _decimal_text(billed), "total_paid": _decimal_text(paid_total),
+        "total_outstanding": _decimal_text(outstanding),
+    }
+
+
+def load_student_fee_statement(student_id: int, actor: str) -> dict:
+    """Administrator-only fee statement for one student through the active term."""
+    if isinstance(student_id, bool) or not isinstance(student_id, int) or student_id <= 0:
+        raise ValueError("Select an existing student.")
+    with connection() as conn:
+        conn.execute("BEGIN")
+        _require_admin(conn, actor)
+        statement = _fee_statement_in_transaction(conn, student_id)
+        statement["school_profile"] = _school_profile_in_transaction(conn)
+        statement["school_logo"] = _school_logo_in_transaction(conn)
+        return statement
+
+
+def record_fee_lump_sum_payment(
+    student_id: int, amount, received_on: str, method: str, reference: str, actor: str
+) -> dict:
+    """Record one payment and allocate it oldest-first across a student's outstanding invoices.
+
+    Only issued invoices up to the active term are paid. The amount may not exceed what
+    is outstanding. Each allocation is a normal immutable payment row, all sharing one
+    lump-sum receipt number, so individual allocations can still be reversed with a reason.
+    """
+    if isinstance(student_id, bool) or not isinstance(student_id, int) or student_id <= 0:
+        raise ValueError("Select an existing student.")
+    value = _decimal_value(amount, "Payment amount")
+    if value <= 0:
+        raise ValueError("Payment amount must be greater than zero.")
+    if not isinstance(received_on, str):
+        raise ValueError("Payment date must use YYYY-MM-DD format.")
+    received_on = _iso_date(received_on, "Payment date").isoformat()
+    if not isinstance(method, str) or method not in PAYMENT_METHODS:
+        raise ValueError("Choose a supported payment method.")
+    if not isinstance(reference, str) or len(reference.strip()) > 100:
+        raise ValueError("Payment reference must be 100 characters or fewer.")
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = _require_admin(conn, actor)
+        statement = _fee_statement_in_transaction(conn, student_id)
+        outstanding = _decimal_value(statement["total_outstanding"], "Outstanding balance")
+        if outstanding <= 0:
+            raise ValueError("This student has no outstanding balance up to the active term.")
+        if value > outstanding:
+            raise ValueError(f"Payment exceeds the outstanding balance of {_decimal_text(outstanding)}.")
+        lump_sum_number = f"LS-{received_on[:4]}-{secrets.token_hex(4).upper()}"
+        remaining = value
+        allocations = []
+        for item in statement["items"]:
+            balance = _decimal_value(item["balance_amount_text"], "Invoice balance")
+            if balance <= 0:
+                continue
+            part = min(balance, remaining)
+            receipt_number = f"RCP-{received_on[:4]}-{secrets.token_hex(5).upper()}"
+            cursor = conn.execute(
+                """INSERT INTO fee_payments
+                   (invoice_id,receipt_number,amount_text,received_on,method,reference,received_by,lump_sum_number)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (item["invoice_id"], receipt_number, _decimal_text(part), received_on, method,
+                 reference.strip(), actor, lump_sum_number),
+            )
+            _audit_in_transaction(conn, actor, "RECEIVE", "fee_payments", int(cursor.lastrowid))
+            allocations.append({
+                "payment_id": int(cursor.lastrowid), "receipt_number": receipt_number,
+                "invoice_number": item["invoice_number"], "session_name": item["session_name"],
+                "term_name": item["term_name"], "amount_text": _decimal_text(part),
+            })
+            remaining -= part
+            if remaining <= 0:
+                break
+        return {"lump_sum_number": lump_sum_number, "total_amount_text": _decimal_text(value), "allocations": allocations}
+
+
+def load_fee_lump_sum_receipt_data(lump_sum_number: str, actor: str) -> dict:
+    """Administrator-only data for one printable lump-sum receipt and its allocations."""
+    if not isinstance(lump_sum_number, str) or not lump_sum_number.strip():
+        raise ValueError("Select a valid lump-sum receipt.")
+    with connection() as conn:
+        conn.execute("BEGIN")
+        _require_admin(conn, actor)
+        rows = conn.execute(
+            """SELECT p.id,p.invoice_id,p.receipt_number,p.amount_text,p.received_on,p.method,p.reference,
+                      p.received_by,i.invoice_number,i.admission_no_snapshot,i.student_name_snapshot,
+                      i.total_amount_text,a.name AS session_name,t.term_name,t.term_order,c.class_name,c.section
+               FROM fee_payments p JOIN fee_invoices i ON i.id=p.invoice_id
+               JOIN fee_invoice_batches b ON b.id=i.batch_id
+               JOIN academic_sessions a ON a.id=b.academic_session_id
+               JOIN terms t ON t.id=b.term_id JOIN classes c ON c.id=b.class_id
+               WHERE p.lump_sum_number=? ORDER BY a.starts_on,t.term_order,p.id""",
+            (lump_sum_number.strip(),),
+        ).fetchall()
+        if not rows:
+            raise ValueError("Lump-sum receipt was not found.")
+        allocations = []
+        total = reversed_total = Decimal("0")
+        for row in rows:
+            amount = _decimal_value(row["amount_text"], "Payment amount")
+            reversed_amount = sum((_decimal_value(r[0], "Reversal amount") for r in conn.execute(
+                "SELECT amount_text FROM fee_payment_reversals WHERE payment_id=?", (row["id"],)
+            )), Decimal("0"))
+            fees = ", ".join(line[0] for line in conn.execute(
+                "SELECT fee_type_name_snapshot FROM fee_invoice_lines WHERE invoice_id=? ORDER BY id", (row["invoice_id"],)
+            ))
+            invoice_balance = _decimal_value(row["total_amount_text"], "Invoice total") - _invoice_net_paid(conn, int(row["invoice_id"]))
+            allocations.append({
+                "receipt_number": row["receipt_number"], "invoice_number": row["invoice_number"],
+                "session_name": row["session_name"], "term_name": row["term_name"],
+                "term_order": int(row["term_order"]), "class_name": row["class_name"], "section": row["section"],
+                "fees": fees, "amount_text": _decimal_text(amount),
+                "reversed_amount_text": _decimal_text(reversed_amount),
+                "invoice_balance_text": _decimal_text(invoice_balance),
+            })
+            total += amount
+            reversed_total += reversed_amount
+        first = rows[0]
+        return {
+            "lump_sum_number": lump_sum_number.strip(),
+            "student_name": first["student_name_snapshot"], "admission_no": first["admission_no_snapshot"],
+            "received_on": first["received_on"], "method": first["method"],
+            "reference": first["reference"], "received_by": first["received_by"],
+            "allocations": allocations, "total_amount_text": _decimal_text(total),
+            "net_amount_text": _decimal_text(total - reversed_total),
+            "school_profile": _school_profile_in_transaction(conn),
+            "school_logo": _school_logo_in_transaction(conn),
+        }
 
 
 def reverse_fee_payment(payment_id: int, amount, reason: str, actor: str) -> None:

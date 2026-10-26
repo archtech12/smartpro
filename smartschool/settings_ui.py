@@ -35,6 +35,8 @@ class SchoolProfilePage(QWidget):
         self._write_id = 0
         self._logo_data = None
         self._logo_name = ""
+        self._signatures = {"class_teacher_signature": None, "head_signature": None}
+        self._signature_status = {}
         layout = QVBoxLayout(self)
         title = QLabel("School profile")
         title.setObjectName("heading")
@@ -72,6 +74,28 @@ class SchoolProfilePage(QWidget):
         logo_row.addWidget(self.choose_logo_button)
         logo_row.addWidget(self.clear_logo_button)
         layout.addLayout(logo_row)
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("Report card shows"))
+        self.ranking_style = QComboBox()
+        for value, label in db.REPORT_RANKING_STYLES.items():
+            self.ranking_style.addItem(label, value)
+        self.ranking_style.setEnabled(self.is_admin)
+        style_row.addWidget(self.ranking_style, 1)
+        layout.addLayout(style_row)
+        for key, label in (("class_teacher_signature", "Class teacher signature"), ("head_signature", "Head of school signature")):
+            row = QHBoxLayout()
+            status = QLabel(f"No {label.lower()} selected")
+            choose = QPushButton(f"Choose {label.lower()}…")
+            clear = QPushButton("Remove")
+            choose.clicked.connect(lambda _checked=False, k=key, l=label: self.choose_signature(k, l))
+            clear.clicked.connect(lambda _checked=False, k=key, l=label: self.clear_signature(k, l))
+            choose.setEnabled(self.is_admin)
+            clear.setEnabled(self.is_admin)
+            row.addWidget(status, 1)
+            row.addWidget(choose)
+            row.addWidget(clear)
+            layout.addLayout(row)
+            self._signature_status[key] = status
         self.status = QLabel("Loading school profile…")
         layout.addWidget(self.status)
         self.save_button = QPushButton("Save school profile")
@@ -86,6 +110,7 @@ class SchoolProfilePage(QWidget):
         try:
             profile = db.load_school_profile()
             self._logo_data = db.load_school_logo()
+            report_settings = db.load_report_settings()
         except Exception as exc:
             self.status.setText("Could not load school profile")
             QMessageBox.warning(self, "Could not load school profile", str(exc))
@@ -100,6 +125,12 @@ class SchoolProfilePage(QWidget):
                     edit.setText(value)
         self._logo_name = ""
         self.logo_status.setText("A logo is saved in this local database" if self._logo_data else "No school logo selected")
+        self.ranking_style.setCurrentIndex(max(0, self.ranking_style.findData(report_settings["ranking_style"])))
+        for key, label in (("class_teacher_signature", "class teacher signature"), ("head_signature", "head of school signature")):
+            self._signatures[key] = report_settings[key]
+            self._signature_status[key].setText(
+                f"A {label} is saved in this local database" if report_settings[key] else f"No {label} selected"
+            )
         self.status.setText("Profile loaded. Details are optional and appear on approved result PDFs.")
 
     def choose_logo(self):
@@ -134,6 +165,44 @@ class SchoolProfilePage(QWidget):
         self._logo_name = path.replace("\\", "/").rsplit("/", 1)[-1]
         self.logo_status.setText(f"{self._logo_name} selected; save to apply")
 
+    def _read_image_file(self, title: str):
+        """Return validated PNG/JPEG bytes chosen by the user, or None if cancelled or rejected."""
+        path, _selected_filter = QFileDialog.getOpenFileName(self, title, "", "Image files (*.png *.jpg *.jpeg)")
+        if not path:
+            return None
+        try:
+            with open(path, "rb") as source:
+                image_data = source.read()
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not read image", str(exc))
+            return None
+        reader = None
+        if len(image_data) <= 1_000_000:
+            image_buffer = QBuffer(QByteArray(image_data))
+            image_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            reader = QImageReader(image_buffer)
+            reader.setDecideFormatFromContent(True)
+        size = reader.size() if reader is not None else None
+        if size is None or size.isEmpty() or size.width() > 3000 or size.height() > 1800 or reader.read().isNull():
+            QMessageBox.warning(self, "Unsupported image", "Choose a readable PNG or JPEG no larger than 1 MB or 3000 × 1800 pixels.")
+            return None
+        return image_data
+
+    def choose_signature(self, key: str, label: str):
+        try:
+            image_data = self._read_image_file(f"Choose {label.lower()}")
+        except Exception as exc:  # keep an unexpected image error from closing the application
+            QMessageBox.warning(self, "Could not use image", str(exc))
+            return
+        if image_data is None:
+            return
+        self._signatures[key] = image_data
+        self._signature_status[key].setText(f"{label} selected; save to apply")
+
+    def clear_signature(self, key: str, label: str):
+        self._signatures[key] = None
+        self._signature_status[key].setText(f"{label} will be removed when you save")
+
     def clear_logo(self):
         self._logo_data = None
         self._logo_name = ""
@@ -151,7 +220,16 @@ class SchoolProfilePage(QWidget):
         self._write_id += 1
         task_id = self._write_id
         logo_data = self._logo_data
-        worker = BackgroundTask(task_id, lambda: db.save_school_profile(profile, self.username, logo_data))
+        ranking_style = self.ranking_style.currentData()
+        signatures = dict(self._signatures)
+        worker = BackgroundTask(
+            task_id,
+            lambda: db.save_school_profile(
+                profile, self.username, logo_data, report_ranking_style=ranking_style,
+                head_signature=signatures["head_signature"],
+                class_teacher_signature=signatures["class_teacher_signature"],
+            ),
+        )
         worker.signals.finished.connect(self._saved)
         self._workers[task_id] = worker
         self._pool.start(worker)
