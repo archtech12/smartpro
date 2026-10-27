@@ -27,6 +27,7 @@ from .settings_ui import SchoolProfilePage
 from .user_accounts_ui import UserAccountsPage
 from .diagnostics_ui import DiagnosticsPage
 from .fees_ui import FeeInvoicePage, FeeReconciliationPage, FeeSetupPage
+from .communication_ui import CommunicationCenterPage
 from .security import hash_password, verify_password
 from .workers import BackgroundTask
 from .student_import import write_student_template
@@ -886,20 +887,25 @@ class ModulePage(QWidget):
         else:
             QMessageBox.information(self, "Export complete", "CSV export finished.")
 
-def _load_dashboard_payload(include_setup):
+def _load_dashboard_payload(username):
     from . import dashboard_data
-    payload = {"counts": db.counts(), "overview": dashboard_data.load_dashboard_overview()}
-    if include_setup:
-        payload["checklist"] = dashboard_data.load_setup_checklist()
+    payload = {
+        "counts": db.counts(),
+        "overview": dashboard_data.load_dashboard_overview(),
+        "checklist": dashboard_data.load_setup_checklist(),
+    }
+    if username:
+        payload["analytics"] = dashboard_data.load_dashboard_analytics(username)
     return payload
 
 
 class Dashboard(QWidget):
     navigation_requested = pyqtSignal(str)
 
-    def __init__(self, role="admin"):
+    def __init__(self, role="admin", username=""):
         super().__init__()
         self.is_teacher = role == "teacher"
+        self.username = username
         self._refresh_id = 0
         self._workers = {}
         self._thread_pool = QThreadPool.globalInstance()
@@ -946,6 +952,12 @@ class Dashboard(QWidget):
         self.insights = QGridLayout()
         self.insights.setSpacing(12)
         layout.addLayout(self.insights)
+        self.alerts_box = QVBoxLayout()
+        self.alerts_box.setSpacing(6)
+        layout.addLayout(self.alerts_box)
+        self.analytics = QGridLayout()
+        self.analytics.setSpacing(12)
+        layout.addLayout(self.analytics)
 
         actions_heading = QLabel("Quick actions")
         actions_heading.setObjectName("subheading")
@@ -989,7 +1001,7 @@ class Dashboard(QWidget):
             return
         self._refresh_id += 1
         request_id = self._refresh_id
-        worker = BackgroundTask(request_id, lambda: _load_dashboard_payload(True))
+        worker = BackgroundTask(request_id, lambda: _load_dashboard_payload(self.username))
         worker.signals.finished.connect(self._payload_loaded)
         self._workers[request_id] = worker
         self._thread_pool.start(worker)
@@ -1064,8 +1076,93 @@ class Dashboard(QWidget):
         for column in range(4):
             self.insights.setColumnStretch(column, 1)
 
+        self._render_analytics(payload.get("analytics"))
         self._checklist = payload.get("checklist")
         self._update_setup_banner()
+
+    def _render_analytics(self, data):
+        self._clear(self.alerts_box)
+        self._clear(self.analytics)
+        if not data:
+            return
+        for alert in data["alerts"][:4]:
+            row = QPushButton(("⚠  " if alert["level"] == "warn" else "ℹ  ") + alert["message"])
+            row.setObjectName("alertWarn" if alert["level"] == "warn" else "alertInfo")
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.setToolTip(f"Open {alert['page']}")
+            row.clicked.connect(lambda checked=False, target=alert["page"]: self.navigation_requested.emit(target))
+            self.alerts_box.addWidget(row)
+
+        fees = data["fees"]
+        fee_card = self._panel("Fee collection")
+        if fees["collection_rate"] is None:
+            fee_card.layout().addWidget(self._muted("No issued invoices yet for the active term."))
+        else:
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(min(fees["collection_rate"], 100))
+            bar.setFormat(f"{fees['collection_rate']}% collected")
+            fee_card.layout().addWidget(bar)
+            fee_card.layout().addWidget(self._muted(
+                f"Billed {fees['billed']}  •  Paid {fees['paid']}  •  Outstanding {fees['outstanding']}"))
+            fee_card.layout().addWidget(self._muted(f"{fees['students_owing']} student(s) owe fees • through {fees['through']}"))
+        self.analytics.addWidget(fee_card, 0, 0)
+
+        strength = self._panel("Students per class")
+        top = max((c["students"] for c in data["class_strength"]), default=0)
+        if top == 0:
+            strength.layout().addWidget(self._muted("No enrolled students yet."))
+        for entry in data["class_strength"][:8]:
+            bar = QProgressBar()
+            bar.setRange(0, top)
+            bar.setValue(entry["students"])
+            bar.setFormat(f"{entry['class']}: {entry['students']}")
+            strength.layout().addWidget(bar)
+        self.analytics.addWidget(strength, 0, 1)
+
+        comm = data["communications"]
+        attendance = data["attendance_rate_30d"]
+        health = self._panel("At a glance")
+        for text in (
+            f"Attendance, last 30 days: {attendance}%" if attendance is not None else "Attendance, last 30 days: no registers yet",
+            f"Messages waiting in outbox: {comm['pending']}",
+            f"Birthdays today: {comm['birthdays_today']}",
+            f"Fee reminders ready: {comm['fee_reminders_ready']}",
+        ):
+            health.layout().addWidget(QLabel(text))
+        open_comm = QPushButton("Open Communication Center")
+        open_comm.clicked.connect(lambda: self.navigation_requested.emit("Communication Center"))
+        health.layout().addWidget(open_comm)
+        self.analytics.addWidget(health, 0, 2)
+
+        feed = self._panel("Recent activity")
+        if not data["activity"]:
+            feed.layout().addWidget(self._muted("Nothing recorded yet."))
+        for entry in data["activity"]:
+            line = QLabel(f"{entry['text']}  ·  {entry['at'][:16]}")
+            line.setWordWrap(True)
+            feed.layout().addWidget(line)
+        self.analytics.addWidget(feed, 1, 0, 1, 3)
+        for column in range(3):
+            self.analytics.setColumnStretch(column, 1)
+
+    @staticmethod
+    def _panel(title):
+        card = QFrame()
+        card.setObjectName("card")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(16, 12, 16, 12)
+        heading = QLabel(title)
+        heading.setObjectName("cardLabel")
+        box.addWidget(heading)
+        return card
+
+    @staticmethod
+    def _muted(text):
+        label = QLabel(text)
+        label.setObjectName("muted")
+        label.setWordWrap(True)
+        return label
 
     def _update_setup_banner(self):
         checklist = self._checklist
@@ -1489,7 +1586,7 @@ class MainWindow(QMainWindow):
         self.pages = {}
         self._page_factories = {}
         self._nav_destinations = {}
-        dash = Dashboard(self.user["role"])
+        dash = Dashboard(self.user["role"], self.user["username"])
         self.pages["Dashboard"] = dash
         dash.navigation_requested.connect(self.show_page)
         self.stack.addWidget(dash)
@@ -1501,7 +1598,7 @@ class MainWindow(QMainWindow):
             tab_specs = [("Main", ["Dashboard", "Grade Entry", "Attendance"])]
         else:
             tab_specs = [
-                ("Main", ["Dashboard", *db.MODULES.keys(), "Enrollments", "Grade Entry", "Attendance", "Timetable", "Fee Invoices", "Transaction History"]),
+                ("Main", ["Dashboard", *db.MODULES.keys(), "Enrollments", "Grade Entry", "Attendance", "Timetable", "Fee Invoices", "Transaction History", "Communication Center"]),
                 ("Settings", ["School Profile", "Academic Calendar", "Legacy Class Review", "Class Stages", "Class Subjects", "Grade Bands", "Assessment Setup", "Fee Setup", "User Accounts", "Data Backup", "Database Diagnostics"]),
             ]
         for tab_index, (tab_name, page_names) in enumerate(tab_specs):
@@ -1646,6 +1743,8 @@ class MainWindow(QMainWindow):
             page.refresh()
         elif name == "User Accounts" and not created_now:
             page.refresh()
+        elif name == "Communication Center" and not created_now:
+            page.refresh()
 
     def _create_page(self, name):
         if name == "School Profile":
@@ -1660,6 +1759,8 @@ class MainWindow(QMainWindow):
             return FeeInvoicePage(self.user["username"], self.user["role"])
         if name == "Transaction History":
             return FeeReconciliationPage(self.user["username"], self.user["role"])
+        if name == "Communication Center":
+            return CommunicationCenterPage(self.user["username"], self.user["role"])
         if name in db.MODULES:
             return ModulePage(name, self.user["username"])
         if name == "Academic Calendar":

@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -707,6 +707,56 @@ def _migration_24(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 24")
 
 
+def _migration_25(conn: sqlite3.Connection) -> None:
+    """Offline communication centre: templates, an outbox/history, guardian opt-outs and settings."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS communication_templates(
+            kind TEXT PRIMARY KEY CHECK(kind IN ('birthday','fee_reminder','welcome','notice')),
+            subject TEXT NOT NULL CHECK(length(subject) BETWEEN 1 AND 200),
+            body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 4000),
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS communication_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK(kind IN ('birthday','fee_reminder','welcome','notice')),
+            channel TEXT NOT NULL CHECK(channel IN ('email','whatsapp')),
+            student_id INTEGER REFERENCES students(id),
+            recipient_name TEXT NOT NULL,
+            recipient_contact TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','cancelled')),
+            dedupe_key TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            handled_by TEXT,
+            handled_at TEXT)"""
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_messages_dedupe ON communication_messages(dedupe_key) "
+        "WHERE dedupe_key IS NOT NULL AND status IN ('pending','sent')"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comm_messages_status ON communication_messages(status,created_at)")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS communication_opt_outs(
+            student_id INTEGER PRIMARY KEY REFERENCES students(id),
+            reason TEXT NOT NULL DEFAULT '' CHECK(length(reason)<=240),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS communication_settings(
+            key TEXT PRIMARY KEY CHECK(key IN ('country_code')),
+            value TEXT NOT NULL CHECK(length(value)<=8),
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(25)")
+    conn.execute("PRAGMA user_version = 25")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -767,6 +817,8 @@ def initialize() -> None:
                 _migration_23(conn)
             elif next_version == 24:
                 _migration_24(conn)
+            elif next_version == 25:
+                _migration_25(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()

@@ -85,6 +85,13 @@ QPushButton#dashboardAction {{
 }}
 QPushButton#dashboardAction:hover {{ background: {c['primary_soft']}; border-color: {c['primary']}; color: {c['primary']}; }}
 
+QPushButton#alertWarn, QPushButton#alertInfo {{
+    text-align: left; padding: 9px 14px; border-radius: 8px; font-weight: 600;
+}}
+QPushButton#alertWarn {{ background: {c['warn_soft']}; color: {c['warn']}; border: 1px solid {c['warn']}; }}
+QPushButton#alertInfo {{ background: {c['primary_soft']}; color: {c['primary']}; border: 1px solid {c['primary']}; }}
+QPushButton#alertWarn:hover, QPushButton#alertInfo:hover {{ background: {c['surface']}; }}
+
 /* ---------- inputs ---------- */
 QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QPlainTextEdit {{
     padding: 6px 9px; min-height: 20px; border: 1px solid {c['border_strong']}; border-radius: 6px;

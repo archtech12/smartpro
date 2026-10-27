@@ -46,3 +46,24 @@ def test_overview_counts_enrolment_gender_and_attendance(school):
     assert overview["attendance"]["classes_total"] == 3
     assert overview["attendance"]["classes_missing"] == 3
     assert overview["fees"] == {"issued_invoices": 0, "draft_batches": 0}
+
+
+def test_analytics_are_admin_only_and_report_fees_alerts_and_activity(school):
+    import pytest
+    with pytest.raises(PermissionError):
+        dd.load_dashboard_analytics("teacher")
+    student = db.add_row("Students", ["A-1", "Syn", "One", "Female", "", ""], actor="admin")
+    db.create_student_enrollment(student, school["classes"][0], school["session"], "2026-09-01", "admin")
+    db.save_fee_schedule(school["session"], school["classes"][0], school["terms"][0], school["fees"]["School Fees"], "10000", "", "admin")
+    batch = db.generate_fee_invoice_batch(school["session"], school["classes"][0], school["terms"][0], "admin")
+    db.issue_fee_invoice_batch(batch, "admin")
+    data = dd.load_dashboard_analytics("admin")
+    assert data["fees"]["billed"] == "10000" and data["fees"]["paid"] == "0"
+    assert data["fees"]["outstanding"] == "10000" and data["fees"]["collection_rate"] == 0
+    assert data["fees"]["students_owing"] == 1
+    assert any("Fee collection is low" in a["message"] for a in data["alerts"])
+    assert any("no Primary/Secondary stage" in a["message"] for a in data["alerts"])
+    assert data["class_strength"][0] == {"class": "JSS 1 A", "students": 1}
+    assert data["activity"] and "admin" in data["activity"][0]["text"]
+    assert data["attendance_rate_30d"] is None
+    assert data["communications"]["fee_reminders_ready"] == 0  # owed, but no usable contact: not "ready" to send

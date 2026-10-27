@@ -4,8 +4,10 @@ Nothing here writes. Each function opens one short connection and runs
 parameterised queries, so it is safe to call from a background task.
 """
 
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 
+from . import communications
 from . import database as db
 
 # (key, title, why it matters, page to open, required for results/reports?)
@@ -152,4 +154,126 @@ def load_dashboard_overview(today: date | None = None) -> dict:
         },
         "fees": {"issued_invoices": issued, "draft_batches": open_drafts},
         "results": {"awaiting_approval": pending_results},
+    }
+
+
+_ENTITY_LABELS = {
+    "students": "a student", "teachers": "a teacher", "classes": "a class", "subjects": "a subject",
+    "fee_types": "a fee type", "fee_schedules": "a fee schedule", "fee_payments": "a payment",
+    "communication_messages": "a message", "communication_templates": "a message template",
+    "academic_sessions": "an academic session", "terms": "a term", "student_enrollments": "an enrollment",
+    "users": "a user account", "school_profile": "the school profile",
+}
+_ACTION_VERBS = {
+    "CREATE": "created", "UPDATE": "updated", "DELETE": "deleted", "QUEUE": "queued", "MARK_SENT": "marked sent",
+    "CANCEL": "cancelled", "REQUEUE": "requeued", "RESET": "reset", "OPT_OUT": "recorded an opt-out for",
+    "OPT_IN": "removed an opt-out for", "LOGIN": "signed in",
+}
+
+
+def _activity_text(row) -> str:
+    verb = _ACTION_VERBS.get(row["action"], row["action"].replace("_", " ").lower())
+    if row["action"] == "LOGIN":
+        return f"{row['username']} signed in"
+    entity = _ENTITY_LABELS.get(row["entity"], row["entity"].replace("_", " "))
+    return f"{row['username']} {verb} {entity}"
+
+
+def load_dashboard_analytics(actor: str, today: date | None = None) -> dict:
+    """Administrator-only analytics: fees, attendance, class strength, alerts, activity, communications."""
+    today = today or date.today()
+    today_text = today.isoformat()
+    with db.connection() as conn:
+        db._require_admin(conn, actor)
+        session = conn.execute("SELECT id,name FROM academic_sessions WHERE is_current=1").fetchone()
+        term = conn.execute(
+            "SELECT id,term_name FROM terms WHERE academic_session_id=? AND is_current=1", (session["id"],)
+        ).fetchone() if session else None
+        billed = paid = outstanding = Decimal("0")
+        owing_students = 0
+        if session and term:
+            student_ids = [r[0] for r in conn.execute(
+                """SELECT DISTINCT e.student_id FROM fee_invoices i JOIN student_enrollments e ON e.id=i.enrollment_id
+                   JOIN fee_invoice_batches b ON b.id=i.batch_id JOIN fee_invoice_issues x ON x.batch_id=b.id"""
+            )]
+            for student_id in student_ids:
+                statement = db._fee_statement_in_transaction(conn, student_id)
+                billed += Decimal(statement["total_billed"])
+                paid += Decimal(statement["total_paid"])
+                balance = Decimal(statement["total_outstanding"])
+                outstanding += balance
+                owing_students += 1 if balance > 0 else 0
+        rate = int((paid / billed * 100).to_integral_value(rounding="ROUND_FLOOR")) if billed > 0 else None
+
+        attendance_rate = None
+        if session:
+            since = (today - timedelta(days=29)).isoformat()
+            row = conn.execute(
+                """SELECT COALESCE(SUM(CASE WHEN m.status='present' THEN 1 ELSE 0 END),0) p,
+                          COALESCE(SUM(CASE WHEN m.status='absent' THEN 1 ELSE 0 END),0) a
+                   FROM attendance_registers r JOIN attendance_marks m ON m.register_id=r.id
+                   WHERE r.academic_session_id=? AND r.attendance_date BETWEEN ? AND ?""",
+                (session["id"], since, today_text),
+            ).fetchone()
+            if row["p"] + row["a"] > 0:
+                attendance_rate = int(row["p"] * 100 // (row["p"] + row["a"]))
+
+        class_strength = []
+        if session:
+            class_strength = [
+                {"class": f"{r['class_name']} {r['section']}".strip(), "students": r["n"]}
+                for r in conn.execute(
+                    """SELECT c.class_name,c.section,COUNT(e.id) n FROM classes c
+                       LEFT JOIN student_enrollments e ON e.class_id=c.id AND e.academic_session_id=? AND e.status='active'
+                       GROUP BY c.id ORDER BY c.class_name,c.section""", (session["id"],))
+            ]
+        activity = [
+            {"text": _activity_text(r), "at": r["created_at"]}
+            for r in conn.execute("SELECT username,action,entity,created_at FROM audit_log ORDER BY id DESC LIMIT 8")
+        ]
+        unstaged = conn.execute("SELECT COUNT(*) FROM classes WHERE educational_stage IS NULL OR educational_stage=''").fetchone()[0]
+        students = conn.execute("SELECT COUNT(*) FROM students WHERE is_active=1").fetchone()[0]
+        pending_results = 0
+        if session and term:
+            pending_results = conn.execute(
+                """SELECT COUNT(*) FROM assessment_policy_snapshots s WHERE s.academic_session_id=? AND s.term_id=?
+                   AND NOT EXISTS(SELECT 1 FROM assessment_result_approvals a WHERE a.snapshot_id=s.id)""",
+                (session["id"], term["id"]),
+            ).fetchone()[0]
+
+    stats = communications.load_statistics(actor, today)
+    birthdays_today = len(communications.list_birthdays(actor, today, 0)["today"])
+    reminders_ready = sum(1 for c in communications.list_fee_reminder_candidates(actor, today)
+                          if not c["opted_out"] and not c["queued"] and any(c["contacts"].values()))
+
+    alerts = []
+    if not (session and term):
+        alerts.append({"level": "warn", "message": "No current session or term is set.", "page": "Academic Calendar"})
+    if students == 0:
+        alerts.append({"level": "info", "message": "No active students yet. Register students to get started.", "page": "Students"})
+    if unstaged:
+        alerts.append({"level": "warn", "message": f"{unstaged} class(es) have no Primary/Secondary stage.", "page": "Class Stages"})
+    if rate is not None and rate < 20:
+        alerts.append({"level": "warn", "message": f"Fee collection is low ({rate}% of billed fees). Consider sending reminders.", "page": "Communication Center"})
+    if pending_results:
+        alerts.append({"level": "info", "message": f"{pending_results} subject result set(s) await approval this term.", "page": "Grade Entry"})
+    if stats["pending"]:
+        alerts.append({"level": "info", "message": f"{stats['pending']} message(s) are waiting in the outbox.", "page": "Communication Center"})
+    if birthdays_today:
+        alerts.append({"level": "info", "message": f"{birthdays_today} student birthday(s) today.", "page": "Communication Center"})
+
+    return {
+        "fees": {
+            "billed": db._decimal_text(billed), "paid": db._decimal_text(paid),
+            "outstanding": db._decimal_text(outstanding), "collection_rate": rate,
+            "students_owing": owing_students, "through": f"{session['name']} — {term['term_name']}" if session and term else "",
+        },
+        "attendance_rate_30d": attendance_rate,
+        "class_strength": class_strength,
+        "activity": activity,
+        "alerts": alerts,
+        "communications": {
+            "pending": stats["pending"], "sent_today": stats["sent_today"],
+            "birthdays_today": birthdays_today, "fee_reminders_ready": reminders_ready,
+        },
     }
