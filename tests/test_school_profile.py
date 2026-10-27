@@ -27,6 +27,7 @@ def test_school_profile_saves_and_loads_with_admin_audit(school_profile_db):
         "class_teacher_name": "T. Teacher",
         "class_teacher_title": "Class Teacher",
         "school_type": "combined",
+        "admission_id_prefix": "ADM",
     }
     db.save_school_profile(profile, "admin")
     assert db.load_school_profile() == profile
@@ -46,6 +47,9 @@ def test_school_profile_rejects_non_admin_invalid_email_and_overlong_values(scho
         db.save_school_profile({"school_name": "x" * 121}, "admin")
     with pytest.raises(ValueError, match="school type"):
         db.save_school_profile({"school_type": "tertiary"}, "admin")
+    for invalid_prefix in ("", "SCHOOL ID", "-ADM", "ADM-", "A--B", "école"):
+        with pytest.raises(ValueError, match="Student ID prefix"):
+            db.save_school_profile({"admission_id_prefix": invalid_prefix}, "admin")
     assert db.load_school_profile()["school_name"] == ""
 
 
@@ -175,6 +179,13 @@ def test_report_ranking_style_defaults_to_position_and_is_validated(school_profi
         db.save_school_profile({}, "teacher", report_ranking_style="position")
 
 
+def test_admission_prefix_is_uppercase_and_partial_profile_save_preserves_it(school_profile_db):
+    db.save_school_profile({"admission_id_prefix": "sch-1"}, "admin")
+    assert db.load_school_profile()["admission_id_prefix"] == "SCH-1"
+    db.save_school_profile({"school_name": "Renamed School"}, "admin")
+    assert db.load_school_profile()["admission_id_prefix"] == "SCH-1"
+
+
 def test_report_signatures_are_stored_validated_and_removable(school_profile_db):
     db.save_school_profile(
         {"school_name": "Signed"}, "admin", head_signature=PNG_PIXEL, class_teacher_signature=PNG_PIXEL + b"x"
@@ -203,7 +214,7 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
     with db.connection() as conn:  # roll the schema back to v22 the way a pre-upgrade database looks
         conn.execute("DROP INDEX idx_fee_payments_lump_sum")
         conn.execute("ALTER TABLE fee_payments DROP COLUMN lump_sum_number")
-        for column in ("report_ranking_style", "head_signature", "class_teacher_signature"):
+        for column in ("report_ranking_style", "head_signature", "class_teacher_signature", "admission_id_prefix"):
             conn.execute(f"ALTER TABLE school_profile DROP COLUMN {column}")
         conn.execute("DELETE FROM schema_migrations WHERE version>22")
         conn.execute("PRAGMA user_version=22")
@@ -212,9 +223,10 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
 
     with db.connection() as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-4:] == [23, 24, 25, 26]
+        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-4:] == [24, 25, 26, 27]
         assert "lump_sum_number" in {row[1] for row in conn.execute("PRAGMA table_info(fee_payments)")}
     assert db.load_school_profile()["school_name"] == "Kept School"
+    assert db.load_school_profile()["admission_id_prefix"] == "ADM"
     assert db.load_school_logo() == PNG_PIXEL
     assert db.load_report_settings() == {
         "ranking_style": "position", "head_signature": None, "class_teacher_signature": None,

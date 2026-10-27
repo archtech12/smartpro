@@ -126,6 +126,20 @@ def test_bulk_student_registration_preserves_supplied_ids_and_generates_missing_
         )
 
 
+def test_student_id_prefix_setting_applies_to_guided_and_bulk_registration(enrollment_db):
+    ids = enrollment_db
+    db.save_school_profile({"admission_id_prefix": "SCH"}, "admin")
+    guided = db.register_student(
+        "Amina", "Okafor", "Female", "", ids["class_a"], ids["session"], "2026-09-10", "admin"
+    )
+    bulk = db.register_students_bulk(
+        [{"first_name": "Musa", "last_name": "Bello"}],
+        ids["class_a"], ids["session"], "2026-09-10", "admin",
+    )
+    assert guided["admission_no"] == "SCH-2026-00002"
+    assert bulk["admission_numbers"] == ["SCH-2026-00003"]
+
+
 def test_bulk_student_registration_rolls_back_whole_file_on_audit_failure(enrollment_db, monkeypatch):
     ids = enrollment_db
     original_audit = db._audit_in_transaction

@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -769,6 +769,18 @@ def _migration_26(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 26")
 
 
+def _migration_27(conn: sqlite3.Connection) -> None:
+    """Add the configurable prefix used for newly generated student admission IDs."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(school_profile)")}
+    if "admission_id_prefix" not in columns:
+        conn.execute(
+            "ALTER TABLE school_profile ADD COLUMN admission_id_prefix TEXT NOT NULL DEFAULT 'ADM' "
+            "CHECK(length(admission_id_prefix) BETWEEN 1 AND 16)"
+        )
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(27)")
+    conn.execute("PRAGMA user_version = 27")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -833,6 +845,8 @@ def initialize() -> None:
                 _migration_25(conn)
             elif next_version == 26:
                 _migration_26(conn)
+            elif next_version == 27:
+                _migration_27(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()
@@ -849,14 +863,14 @@ SCHOOL_PROFILE_FIELDS = (
     ("school_name", 120), ("address", 200), ("phone", 60), ("email", 120),
     ("head_name", 120), ("head_title", 80),
     ("class_teacher_name", 120), ("class_teacher_title", 80),
-    ("school_type", 16),
+    ("school_type", 16), ("admission_id_prefix", 16),
 )
 
 
 def load_school_profile() -> dict[str, str]:
     with connection() as conn:
         row = conn.execute(
-            "SELECT school_name,address,phone,email,head_name,head_title,class_teacher_name,class_teacher_title,school_type "
+            "SELECT school_name,address,phone,email,head_name,head_title,class_teacher_name,class_teacher_title,school_type,admission_id_prefix "
             "FROM school_profile WHERE id=1"
         ).fetchone()
         return {key: str(row[key] or "") for key, _limit in SCHOOL_PROFILE_FIELDS}
@@ -870,7 +884,7 @@ def load_school_logo() -> bytes | None:
 
 def _school_profile_in_transaction(conn: sqlite3.Connection) -> dict[str, str]:
     row = conn.execute(
-        "SELECT school_name,address,phone,email,head_name,head_title,class_teacher_name,class_teacher_title,school_type "
+        "SELECT school_name,address,phone,email,head_name,head_title,class_teacher_name,class_teacher_title,school_type,admission_id_prefix "
         "FROM school_profile WHERE id=1"
     ).fetchone()
     return {key: str(row[key] or "") for key, _limit in SCHOOL_PROFILE_FIELDS}
@@ -935,12 +949,21 @@ def save_school_profile(
             term_dates[column] = _iso_date(value, label).isoformat() if value else ""
     values = {}
     for field, max_length in SCHOOL_PROFILE_FIELDS:
+        if field == "admission_id_prefix" and field not in profile:
+            values[field] = None  # preserve the saved prefix for partial profile updates
+            continue
         value = profile.get(field, "")
         if not isinstance(value, str):
             raise ValueError(f"{field.replace('_', ' ').capitalize()} must be text.")
         value = value.strip()
         if len(value) > max_length:
             raise ValueError(f"{field.replace('_', ' ').capitalize()} must be {max_length} characters or fewer.")
+        if field == "admission_id_prefix":
+            value = value.upper()
+            compact = value.replace("-", "")
+            if (not value or not value.isascii() or not compact.isalnum()
+                    or value.startswith("-") or value.endswith("-") or "--" in value):
+                raise ValueError("Student ID prefix must use letters and numbers, with single hyphens only.")
         values[field] = value
     if values["email"] and ("@" not in values["email"] or values["email"].startswith("@") or values["email"].endswith("@")):
         raise ValueError("Enter a valid email address, or leave it blank.")
@@ -959,6 +982,11 @@ def save_school_profile(
     with connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         actor = _require_admin(conn, actor)
+        if values["admission_id_prefix"] is None:
+            saved_prefix = conn.execute(
+                "SELECT admission_id_prefix FROM school_profile WHERE id=1"
+            ).fetchone()
+            values["admission_id_prefix"] = saved_prefix[0] if saved_prefix else "ADM"
         columns = ",".join(f"{field}=?" for field, _limit in SCHOOL_PROFILE_FIELDS)
         params = [values[field] for field, _limit in SCHOOL_PROFILE_FIELDS]
         extra_clause = ""
@@ -2860,59 +2888,88 @@ def load_result_sheet_data(academic_session_id: int, class_id: int, term_id: int
 def load_master_sheet_data(academic_session_id: int, class_id: int, term_id: int) -> dict:
     """Load all complete approved subject results, requiring one consistent frozen roster."""
     with connection() as conn:
-        term = conn.execute(
-            "SELECT academic_session_id,term_name,term_order FROM terms WHERE id=?", (term_id,)
-        ).fetchone()
-        session = conn.execute("SELECT name FROM academic_sessions WHERE id=?", (academic_session_id,)).fetchone()
-        class_row = conn.execute("SELECT class_name,section FROM classes WHERE id=?", (class_id,)).fetchone()
-        if not term or not session or not class_row or term["academic_session_id"] != academic_session_id:
-            raise ValueError("Select a valid session, class, and term.")
-        assignments = conn.execute(
-            "SELECT id FROM class_subject_assignments WHERE academic_session_id=? AND class_id=? ORDER BY id",
-            (academic_session_id, class_id),
-        ).fetchall()
-        if not assignments:
-            raise ValueError("No class subjects are assigned for this academic session.")
-        subject_sets = [
-            _load_approved_subject_results(conn, int(item["id"]), term_id)
-            for item in assignments
-        ]
-        expected_roster = subject_sets[0]["roster_ids"]
-        if any(item["roster_ids"] != expected_roster for item in subject_sets[1:]):
-            raise ValueError("Subject result rosters differ. Resolve enrollment or score-entry rosters before creating a master sheet.")
-        by_enrollment = {
-            int(student["enrollment_id"]): dict(student)
-            for student in subject_sets[0]["students"]
-        }
-        subjects = []
-        for result_set in subject_sets:
-            assignment = result_set["assignment"]
-            subjects.append({"id": int(assignment["id"]), "subject_code": assignment["subject_code"], "subject_name": assignment["subject_name"]})
-            for student in result_set["students"]:
-                by_enrollment[int(student["enrollment_id"])].setdefault("results", {})[
-                    int(assignment["id"])
-                ] = student["result"]
-        common_bands = _common_grade_bands([item["bands"] for item in subject_sets])
-        exact_averages = {}
-        for enrollment_id, student in by_enrollment.items():
-            student_results = list(student["results"].values())
-            student["overall"] = calculate_overall_average(student_results, common_bands)
-            exact_averages[enrollment_id] = _overall_average_fraction(student_results)
-        positions = calculate_class_positions(exact_averages)
-        for enrollment_id, student in by_enrollment.items():
-            student["position"] = positions[enrollment_id]
-        students = sorted(
-            by_enrollment.values(),
-            key=lambda item: (item["last_name"].casefold(), item["first_name"].casefold(), int(item["enrollment_id"])),
-        )
-        return {
-            "academic_session": session["name"], "term_name": term["term_name"],
-            "term_order": int(term["term_order"]), "class_name": class_row["class_name"],
-            "section": class_row["section"], "subjects": subjects, "students": students,
-            "approval_status": "Approved",
-            "school_profile": _school_profile_in_transaction(conn),
-            "school_logo": _school_logo_in_transaction(conn),
-        }
+        return _load_master_sheet_in_transaction(conn, academic_session_id, class_id, term_id)
+
+
+def _load_master_sheet_in_transaction(
+    conn, academic_session_id: int, class_id: int, term_id: int, include_school_assets: bool = True
+) -> dict:
+    term = conn.execute(
+        "SELECT academic_session_id,term_name,term_order FROM terms WHERE id=?", (term_id,)
+    ).fetchone()
+    session = conn.execute("SELECT name FROM academic_sessions WHERE id=?", (academic_session_id,)).fetchone()
+    class_row = conn.execute("SELECT class_name,section FROM classes WHERE id=?", (class_id,)).fetchone()
+    if not term or not session or not class_row or term["academic_session_id"] != academic_session_id:
+        raise ValueError("Select a valid session, class, and term.")
+    assignments = conn.execute(
+        "SELECT id FROM class_subject_assignments WHERE academic_session_id=? AND class_id=? ORDER BY id",
+        (academic_session_id, class_id),
+    ).fetchall()
+    if not assignments:
+        raise ValueError("No class subjects are assigned for this academic session.")
+    subject_sets = [
+        _load_approved_subject_results(conn, int(item["id"]), term_id)
+        for item in assignments
+    ]
+    expected_roster = subject_sets[0]["roster_ids"]
+    if any(item["roster_ids"] != expected_roster for item in subject_sets[1:]):
+        raise ValueError("Subject result rosters differ. Resolve enrollment or score-entry rosters before creating a master sheet.")
+    by_enrollment = {
+        int(student["enrollment_id"]): dict(student)
+        for student in subject_sets[0]["students"]
+    }
+    subjects = []
+    for result_set in subject_sets:
+        assignment = result_set["assignment"]
+        subjects.append({"id": int(assignment["id"]), "subject_code": assignment["subject_code"], "subject_name": assignment["subject_name"]})
+        for student in result_set["students"]:
+            by_enrollment[int(student["enrollment_id"])].setdefault("results", {})[
+                int(assignment["id"])
+            ] = student["result"]
+    common_bands = _common_grade_bands([item["bands"] for item in subject_sets])
+    exact_averages = {}
+    for enrollment_id, student in by_enrollment.items():
+        student_results = list(student["results"].values())
+        student["overall"] = calculate_overall_average(student_results, common_bands)
+        exact_averages[enrollment_id] = _overall_average_fraction(student_results)
+    positions = calculate_class_positions(exact_averages)
+    for enrollment_id, student in by_enrollment.items():
+        student["position"] = positions[enrollment_id]
+    students = sorted(
+        by_enrollment.values(),
+        key=lambda item: (item["last_name"].casefold(), item["first_name"].casefold(), int(item["enrollment_id"])),
+    )
+    return {
+        "academic_session": session["name"], "term_name": term["term_name"],
+        "term_order": int(term["term_order"]), "class_name": class_row["class_name"],
+        "section": class_row["section"], "subjects": subjects, "students": students,
+        "approval_status": "Approved",
+        "school_profile": _school_profile_in_transaction(conn) if include_school_assets else {},
+        "school_logo": _school_logo_in_transaction(conn) if include_school_assets else None,
+    }
+
+
+def _top_academic_achievers_in_transaction(conn, academic_session_id: int, term_id: int, limit: int = 5) -> list[dict]:
+    """Return leaders only from complete, approved, roster-consistent class results."""
+    ranked = []
+    classes = conn.execute("SELECT id,class_name,section FROM classes ORDER BY class_name,section,id").fetchall()
+    for class_row in classes:
+        try:
+            master = _load_master_sheet_in_transaction(
+                conn, academic_session_id, int(class_row["id"]), term_id, include_school_assets=False
+            )
+        except ValueError:
+            continue
+        class_name = f"{class_row['class_name']} {class_row['section']}".strip()
+        for student in master["students"]:
+            ranked.append({
+                "name": f"{student['first_name']} {student['last_name']}".strip(),
+                "admission_no": student.get("admission_no", ""),
+                "class": class_name,
+                "average": student["overall"]["average"],
+            })
+    ranked.sort(key=lambda item: (-float(item["average"]), item["name"].casefold(), item["class"].casefold()))
+    return ranked[:max(0, min(int(limit), 20))]
 
 
 def _enrollment_context(conn: sqlite3.Connection, student_id: int, class_id: int, session_id: int):
@@ -2936,6 +2993,21 @@ def _validate_enrollment_date(value: str, session, field_name: str) -> str:
     if normalized < session["starts_on"] or normalized > session["ends_on"]:
         raise ValueError(f"{field_name} must fall within the academic session dates.")
     return normalized
+
+
+def _generate_admission_number(conn: sqlite3.Connection, year: str, next_number: int, reserved: set[str] | None = None):
+    """Generate a unique, configured-prefix admission ID inside the caller's write transaction."""
+    row = conn.execute("SELECT admission_id_prefix FROM school_profile WHERE id=1").fetchone()
+    prefix = str(row[0] if row else "ADM")
+    reserved = reserved or set()
+    while True:
+        admission_no = f"{prefix}-{year}-{next_number:05d}"
+        if (admission_no.casefold() not in reserved
+                and not conn.execute(
+                    "SELECT 1 FROM students WHERE admission_no=? COLLATE NOCASE", (admission_no,)
+                ).fetchone()):
+            return admission_no, next_number + 1
+        next_number += 1
 
 
 def register_student(
@@ -3001,11 +3073,7 @@ def register_student(
         class_label = " ".join(part for part in (class_row["class_name"], class_row["section"]) if part)
         year = enrolled_on[:4]
         next_number = int(conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM students").fetchone()[0])
-        while True:
-            admission_no = f"ADM-{year}-{next_number:05d}"
-            if not conn.execute("SELECT 1 FROM students WHERE admission_no=?", (admission_no,)).fetchone():
-                break
-            next_number += 1
+        admission_no, _next_number = _generate_admission_number(conn, year, next_number)
         cursor = conn.execute(
             "INSERT INTO students(admission_no,first_name,last_name,gender,class_name,guardian_phone,photo_data,nin,date_of_birth,email) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -3107,15 +3175,15 @@ def register_students_bulk(
             if conn.execute("SELECT 1 FROM students WHERE admission_no=? COLLATE NOCASE", (admission_no,)).fetchone():
                 raise ValueError(f"Admission number {admission_no!r} is already in use.")
         admission_numbers = []
+        reserved_numbers = set(supplied_numbers)
         for student in normalized_students:
             year = enrolled_on[:4]
             admission_no = student["admission_no"]
             if not admission_no:
-                admission_no = f"ADM-{year}-{next_number:05d}"
-                while conn.execute("SELECT 1 FROM students WHERE admission_no=?", (admission_no,)).fetchone():
-                    next_number += 1
-                    admission_no = f"ADM-{year}-{next_number:05d}"
-                next_number += 1
+                admission_no, next_number = _generate_admission_number(
+                    conn, year, next_number, reserved_numbers
+                )
+                reserved_numbers.add(admission_no.casefold())
             cursor = conn.execute(
                 "INSERT INTO students(admission_no,first_name,last_name,gender,class_name,guardian_phone,nin,date_of_birth,email) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",

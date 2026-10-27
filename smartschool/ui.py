@@ -1082,11 +1082,11 @@ class Dashboard(QWidget):
         for column in range(4):
             self.insights.setColumnStretch(column, 1)
 
-        self._render_analytics(payload.get("analytics"))
+        self._render_analytics(payload.get("analytics"), overview.get("demographics", {}))
         self._checklist = payload.get("checklist")
         self._update_setup_banner()
 
-    def _render_analytics(self, data):
+    def _render_analytics(self, data, demographics=None):
         self._clear(self.alerts_box)
         self._clear(self.analytics)
         if not data:
@@ -1141,6 +1141,25 @@ class Dashboard(QWidget):
         health.layout().addWidget(open_comm)
         self.analytics.addWidget(health, 0, 2)
 
+        demographics = demographics or {}
+        demo = self._panel("Student demographics")
+        for label, key in (("Boys", "boys"), ("Girls", "girls"), ("Other", "other"), ("Not recorded", "not_set")):
+            line = QLabel(f"{label}: {int(demographics.get(key, 0))}")
+            line.setObjectName("muted")
+            demo.layout().addWidget(line)
+        self.analytics.addWidget(demo, 0, 3)
+
+        achievers = self._panel("Top academic achievers")
+        leaders = data.get("top_academic_achievers", [])
+        if not leaders:
+            achievers.layout().addWidget(self._muted("No complete, approved results for the active term yet."))
+        for index, student in enumerate(leaders, start=1):
+            average = student["average"]
+            line = QLabel(f"{index}. {student['name']}  ·  {student['class']}  ·  {average}%")
+            line.setWordWrap(True)
+            achievers.layout().addWidget(line)
+        self.analytics.addWidget(achievers, 1, 0, 1, 2)
+
         feed = self._panel("Recent activity")
         if not data["activity"]:
             feed.layout().addWidget(self._muted("Nothing recorded yet."))
@@ -1148,8 +1167,8 @@ class Dashboard(QWidget):
             line = QLabel(f"{entry['text']}  ·  {entry['at'][:16]}")
             line.setWordWrap(True)
             feed.layout().addWidget(line)
-        self.analytics.addWidget(feed, 1, 0, 1, 3)
-        for column in range(3):
+        self.analytics.addWidget(feed, 1, 2, 1, 2)
+        for column in range(4):
             self.analytics.setColumnStretch(column, 1)
 
     @staticmethod

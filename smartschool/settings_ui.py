@@ -16,6 +16,7 @@ from .workers import BackgroundTask
 class SchoolProfilePage(QWidget):
     FIELDS = (
         ("school_name", "School name", 120),
+        ("admission_id_prefix", "Student admission ID prefix", 16),
         ("school_type", "School type", 16),
         ("address", "Address", 200),
         ("phone", "Phone", 60),
@@ -42,8 +43,8 @@ class SchoolProfilePage(QWidget):
         title.setObjectName("heading")
         layout.addWidget(title)
         layout.addWidget(wrapped_label(
-            "These optional details appear on approved report cards and result sheets. "
-            "Leaving a field blank omits it from the PDF. Optional PNG/JPEG logos are stored locally."
+            "These details appear on approved reports. New student IDs use the prefix, year, and a unique sequence "
+            "(for example, ADM-2026-00001); changing the prefix does not change existing IDs."
         ))
         form = QFormLayout()
         self.fields = {}
@@ -59,6 +60,9 @@ class SchoolProfilePage(QWidget):
                 edit = QLineEdit()
                 edit.setMaxLength(max_length)
                 edit.setReadOnly(not self.is_admin)
+                if key == "admission_id_prefix":
+                    edit.setPlaceholderText("ADM")
+                    edit.setToolTip("1–16 letters or numbers; single hyphens are allowed. Applies to newly generated student IDs.")
             self.fields[key] = edit
             form.addRow(label, edit)
         layout.addLayout(form)

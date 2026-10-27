@@ -105,6 +105,17 @@ def load_dashboard_overview(today: date | None = None) -> dict:
                    WHERE e.academic_session_id=? AND e.status='active' GROUP BY g ORDER BY g""", (sid,)
             ):
                 gender[row["g"]] = row["n"]
+        demographics = {"boys": 0, "girls": 0, "other": 0, "not_set": 0}
+        for label, count in gender.items():
+            normalized = label.strip().casefold()
+            if normalized in {"male", "m", "boy", "boys"}:
+                demographics["boys"] += count
+            elif normalized in {"female", "f", "girl", "girls"}:
+                demographics["girls"] += count
+            elif normalized in {"", "not set", "unknown"}:
+                demographics["not_set"] += count
+            else:
+                demographics["other"] += count
         present = absent = registers = 0
         if sid:
             row = conn.execute(
@@ -147,6 +158,7 @@ def load_dashboard_overview(today: date | None = None) -> dict:
         "today": today_text,
         "enrolled": enrolled,
         "gender": gender,
+        "demographics": demographics,
         "attendance": {
             "registers": registers, "present": present, "absent": absent,
             "classes_total": class_total, "classes_taken": classes_with_register,
@@ -240,6 +252,9 @@ def load_dashboard_analytics(actor: str, today: date | None = None) -> dict:
                    AND NOT EXISTS(SELECT 1 FROM assessment_result_approvals a WHERE a.snapshot_id=s.id)""",
                 (session["id"], term["id"]),
             ).fetchone()[0]
+        achievers = db._top_academic_achievers_in_transaction(
+            conn, int(session["id"]), int(term["id"]), limit=5
+        ) if session and term else []
 
     stats = communications.load_statistics(actor, today)
     birthdays_today = len(communications.list_birthdays(actor, today, 0)["today"])
@@ -270,6 +285,7 @@ def load_dashboard_analytics(actor: str, today: date | None = None) -> dict:
         },
         "attendance_rate_30d": attendance_rate,
         "class_strength": class_strength,
+        "top_academic_achievers": achievers,
         "activity": activity,
         "alerts": alerts,
         "communications": {
