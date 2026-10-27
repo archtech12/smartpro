@@ -31,3 +31,8 @@ htmlcov/
 /dist/
 /tmp/
 /SmartSchool-main/
+
+# Installer build output
+/installer/
+/.venv-build/
+*.spec.bak

@@ -1,11 +1,13 @@
 import sys
 from PyQt6.QtWidgets import QApplication
 from smartschool.ui import run_app
+from smartschool.version import __version__
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SmartSchool Manager Rebuild")
     app.setOrganizationName("SmartSchool")
+    app.setApplicationVersion(__version__)
     try:
         window = run_app()
         window.showMaximized()

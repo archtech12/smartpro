@@ -130,6 +130,12 @@ Add each subject in **Main > Subjects**, then create the academic session and se
 
 In **Settings > School Profile**, select **Primary**, **Secondary**, or **Primary and Secondary** under School type, then save the profile. Class-stage setup follows this selection; if existing classes have a conflicting stage, the screen flags them for correction without changing their records automatically. In **Settings > Academic Calendar > Sessions**, select a session and click **Set Selected Session as Active**. Open **Terms**, choose the session, select a term, and click **Set Selected Term as Active**. Only one academic session can be active; each session can have one active term. The active session and term are prioritized in academic workflow selectors.
 
+## Building the Windows installer
+
+`packaging\build_windows.ps1` builds `installer\SmartSchoolManager-Setup-<version>.exe`
+(PyInstaller + Inno Setup). It runs the tests first and never touches school data. See
+[docs/PACKAGING.md](docs/PACKAGING.md) for requirements, releasing, upgrades and SmartScreen.
+
 ## Data location
 The database is stored in the current user's local application data directory, not in the program installation folder:
 `%LOCALAPPDATA%\SmartSchoolManagerRebuild\school.db`
