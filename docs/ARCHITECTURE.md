@@ -37,6 +37,10 @@ Class promotion reuses the session enrollment model without a schema change. Adm
 
 Schema version 22 adds optional student NIN, date of birth, and email fields with an additive migration; existing rows receive blank values and remain unchanged. Student imports validate optional values before committing the roster.
 
+## Presentation and packaging
+
+`theme.py` is a Qt-free design-token module that builds one application stylesheet; `ui_polish.py` installs it app-wide and tidies tables on first show. Dashboard and setup-guide data come from the read-only `dashboard_data.py` so the UI stays thin. `version.py` is the single version source for the installer build in `packaging/`. The installer never writes to `%LOCALAPPDATA%\SmartSchoolManagerRebuild`.
+
 ## Compatibility
 
 Preserve existing table data with additive migrations unless removal is explicitly requested. Any table rebuild or destructive removal requires a documented migration plan, verified pre-upgrade backup, recovery path, and clear upgrade path. Keep the original installation and its database entirely separate.

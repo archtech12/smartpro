@@ -79,10 +79,11 @@
 - `docs/IMPLEMENTATION_ROADMAP.md`
 - `docs/SECURITY_MODEL.md`
 - `docs/ASSESSMENT_POLICY.md`
+- `docs/PACKAGING.md` (Windows installer build)
 
 ## Last verified checkpoint
 
-- Full test suite: 196 passed.
+- Full test suite (without PyQt6, so Qt-dependent tests excluded or skipped): 227 passed, 10 skipped; the same 8 Qt tests fail only because PyQt6 is missing. Run the full suite with PyQt6 before relying on this.
 - Syntax compilation: passed.
 - Qt UI coverage ran offscreen; a native Windows visual review was not performed.
 - Re-run the checks in the coding environment before relying on this checkpoint.

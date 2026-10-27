@@ -50,7 +50,7 @@ Initial responsiveness work debounces list searches, loads record/enrollment pag
 
 ## Phase 10 — Release readiness
 
-Complete security, performance, usability, accessibility, recovery, and Windows compatibility reviews; package only after release checks pass.
+Complete security, performance, usability, accessibility, recovery, and Windows compatibility reviews; package only after release checks pass. Packaging is prepared: `packaging/` holds a PyInstaller spec, an Inno Setup script and `build_windows.ps1`, and `docs/PACKAGING.md` describes building, releasing, upgrade testing and code signing. The installer has not yet been built or run on Windows, and the release checks above are still open.
 
 ## Phase 11 — Optional extensions
 
