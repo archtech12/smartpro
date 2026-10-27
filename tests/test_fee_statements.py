@@ -239,3 +239,35 @@ def test_invoice_loader_exposes_student_and_lump_sum_links(school):
     data = db.load_fee_invoice_data(school["session"], school["classes"][0], school["terms"][0])
     assert {row["student_id"] for row in data["invoices"]} == {student}
     assert [p["lump_sum_number"] for p in data["payments"] if p["lump_sum_number"]] == [result["lump_sum_number"]]
+
+
+def test_whole_session_can_be_paid_ahead_across_issued_later_terms(school):
+    student = _student(school, "ADM-AHEAD")
+    for term_index in (0, 1, 2):          # the school issues the whole session's invoices up front
+        _bill_term(school, term_index, school_fee="30000", exam="")
+    db.set_current_term(school["terms"][0], "admin")
+    statement = db.load_student_fee_statement(student, "admin")
+    assert statement["total_outstanding"] == "30000" and statement["later_outstanding"] == "60000"
+    assert [i["term_name"] for i in statement["later_items"]] == ["Second Term", "Third Term"]
+
+    with pytest.raises(ValueError, match="exceeds the outstanding balance of 30000"):
+        db.record_fee_lump_sum_payment(student, "90000", "2026-09-10", "cash", "", "admin")   # default scope: active term only
+    result = db.record_fee_lump_sum_payment(student, "90000", "2026-09-10", "cash", "", "admin", include_later_terms=True)
+    assert [a["term_name"] for a in result["allocations"]] == ["First Term", "Second Term", "Third Term"]
+    assert [a["amount_text"] for a in result["allocations"]] == ["30000", "30000", "30000"]
+    after = db.load_student_fee_statement(student, "admin")
+    assert after["total_outstanding"] == "0" and after["later_outstanding"] == "0"
+    with pytest.raises(ValueError, match="no outstanding balance"):
+        db.record_fee_lump_sum_payment(student, "1", "2026-09-11", "cash", "", "admin", include_later_terms=True)
+
+
+def test_paying_ahead_partially_fills_oldest_first_and_never_overpays(school):
+    student = _student(school, "ADM-PART")
+    for term_index in (0, 1):
+        _bill_term(school, term_index, school_fee="30000", exam="")
+    result = db.record_fee_lump_sum_payment(student, "40000", "2026-09-10", "cash", "", "admin", include_later_terms=True)
+    assert [a["amount_text"] for a in result["allocations"]] == ["30000", "10000"]
+    statement = db.load_student_fee_statement(student, "admin")
+    assert statement["total_outstanding"] == "0" and statement["later_outstanding"] == "20000"
+    with pytest.raises(ValueError, match="exceeds the outstanding balance of 20000"):
+        db.record_fee_lump_sum_payment(student, "20001", "2026-09-11", "cash", "", "admin", include_later_terms=True)

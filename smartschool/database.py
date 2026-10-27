@@ -4707,21 +4707,31 @@ def _fee_statement_in_transaction(conn: sqlite3.Connection, student_id: int) -> 
            WHERE e.student_id=? ORDER BY a.starts_on,t.term_order,i.id""",
         (student_id,),
     ).fetchall()
-    items, later = [], 0
-    billed = paid_total = outstanding = Decimal("0")
+    items, later_items = [], []
+    billed = paid_total = outstanding = later_outstanding = Decimal("0")
     for row in rows:
         same_session = int(row["academic_session_id"]) == int(session["id"])
-        if (not same_session and row["starts_on"] > session["starts_on"]) or (
+        is_later = (not same_session and row["starts_on"] > session["starts_on"]) or (
             same_session and int(row["term_order"]) > int(term["term_order"])
-        ):
-            later += 1
-            continue
+        )
         total = _decimal_value(row["total_amount_text"], "Invoice total")
         paid = _invoice_net_paid(conn, int(row["id"]))
         balance = total - paid
         fees = ", ".join(line[0] for line in conn.execute(
             "SELECT fee_type_name_snapshot FROM fee_invoice_lines WHERE invoice_id=? ORDER BY id", (row["id"],)
         ))
+        if is_later:
+            later_items.append({
+                "invoice_id": int(row["id"]), "invoice_number": row["invoice_number"],
+                "session_name": row["session_name"], "term_name": row["term_name"],
+                "term_order": int(row["term_order"]), "class_name": row["class_name"], "section": row["section"],
+                "fees": fees, "total_amount_text": _decimal_text(total), "paid_amount_text": _decimal_text(paid),
+                "balance_amount_text": _decimal_text(balance),
+                "status": "Paid" if balance <= 0 else ("Part paid" if paid > 0 else "Unpaid"), "carried_over": False,
+                "later_term": True,
+            })
+            later_outstanding += balance
+            continue
         items.append({
             "invoice_id": int(row["id"]), "invoice_number": row["invoice_number"],
             "session_name": row["session_name"], "term_name": row["term_name"],
@@ -4740,7 +4750,8 @@ def _fee_statement_in_transaction(conn: sqlite3.Connection, student_id: int) -> 
             "first_name": student["first_name"], "last_name": student["last_name"],
         },
         "current_session": session["name"], "current_term": term["term_name"],
-        "items": items, "later_term_invoice_count": later,
+        "items": items, "later_term_invoice_count": len(later_items),
+        "later_items": later_items, "later_outstanding": _decimal_text(later_outstanding),
         "total_billed": _decimal_text(billed), "total_paid": _decimal_text(paid_total),
         "total_outstanding": _decimal_text(outstanding),
     }
@@ -4760,12 +4771,14 @@ def load_student_fee_statement(student_id: int, actor: str) -> dict:
 
 
 def record_fee_lump_sum_payment(
-    student_id: int, amount, received_on: str, method: str, reference: str, actor: str
+    student_id: int, amount, received_on: str, method: str, reference: str, actor: str,
+    include_later_terms: bool = False,
 ) -> dict:
     """Record one payment and allocate it oldest-first across a student's outstanding invoices.
 
-    Only issued invoices up to the active term are paid. The amount may not exceed what
-    is outstanding. Each allocation is a normal immutable payment row, all sharing one
+    Only issued invoices up to the active term are paid, unless ``include_later_terms`` is set:
+    then issued invoices for later terms are paid too (paying ahead, e.g. a whole session), still
+    oldest first. The amount may not exceed what is outstanding in the chosen scope. Each allocation is a normal immutable payment row, all sharing one
     lump-sum receipt number, so individual allocations can still be reversed with a reason.
     """
     if isinstance(student_id, bool) or not isinstance(student_id, int) or student_id <= 0:
@@ -4784,7 +4797,8 @@ def record_fee_lump_sum_payment(
         conn.execute("BEGIN IMMEDIATE")
         actor = _require_admin(conn, actor)
         statement = _fee_statement_in_transaction(conn, student_id)
-        outstanding = _decimal_value(statement["total_outstanding"], "Outstanding balance")
+        payable = list(statement["items"]) + (list(statement["later_items"]) if include_later_terms else [])
+        outstanding = sum((_decimal_value(i["balance_amount_text"], "Invoice balance") for i in payable if _decimal_value(i["balance_amount_text"], "Invoice balance") > 0), Decimal("0"))
         if outstanding <= 0:
             raise ValueError("This student has no outstanding balance up to the active term.")
         if value > outstanding:
@@ -4792,7 +4806,7 @@ def record_fee_lump_sum_payment(
         lump_sum_number = f"LS-{received_on[:4]}-{secrets.token_hex(4).upper()}"
         remaining = value
         allocations = []
-        for item in statement["items"]:
+        for item in payable:
             balance = _decimal_value(item["balance_amount_text"], "Invoice balance")
             if balance <= 0:
                 continue
