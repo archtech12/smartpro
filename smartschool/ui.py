@@ -1,13 +1,15 @@
 from PyQt6.QtCore import QBuffer, QByteArray, QDate, QIODevice, Qt, QTimer, QThreadPool, QEventLoop, pyqtSignal
-from PyQt6.QtGui import QImage, QImageReader, QPixmap
+from PyQt6.QtGui import QImage, QImageReader, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QTableWidget, QTableWidgetItem, QMessageBox,
     QDialog, QFormLayout, QDialogButtonBox, QStackedWidget, QFrame, QDateEdit,
-    QFileDialog, QInputDialog, QProgressBar, QTabWidget, QScrollArea, QCheckBox
+    QFileDialog, QInputDialog, QProgressBar, QTabWidget, QScrollArea, QCheckBox, QGridLayout
 )
 from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
+from .theme import build_stylesheet
+from .ui_polish import install_polish
 from . import database as db
 from . import backups as backup_services
 from .academic_ui import (
@@ -30,24 +32,7 @@ from .workers import BackgroundTask
 from .student_import import write_student_template
 from .student_import_ui import StudentImportDialog
 
-STYLE = """
-QWidget { font-family: Segoe UI; font-size: 10pt; color: #182230; background: #f5f7fb; }
-QLabel#heading { font-size: 22pt; font-weight: 700; color: #102a43; }
-QLabel#muted { color: #607080; }
-QPushButton { padding: 8px 13px; border: 1px solid #d0d7e2; border-radius: 6px; background: white; }
-QPushButton:hover { background: #eaf1fb; }
-QPushButton#primary { background: #155eef; color: white; border: 0; font-weight: 600; }
-QLineEdit, QComboBox { padding: 8px; border: 1px solid #cbd5e1; border-radius: 5px; background: white; }
-QTableWidget { background: white; border: 1px solid #d9e0ea; gridline-color: #e6ebf2; }
-QHeaderView::section { background: #edf2f7; padding: 8px; border: 0; font-weight: 600; }
-QFrame#sidebar { background: #102a43; }
-QTabWidget#navTabs::pane { border: 0; }
-QTabWidget#navTabs QTabBar::tab { background: #173b5d; color: #d9e6f2; padding: 8px 12px; border: 0; }
-QTabWidget#navTabs QTabBar::tab:selected { background: #24547b; color: white; font-weight: 600; }
-QScrollArea#navScroll, QScrollArea#navScroll QWidget { background: #102a43; }
-QPushButton#nav { background: transparent; color: white; text-align: left; border: 0; padding: 11px; }
-QPushButton#nav:hover { background: #254766; }
-"""
+STYLE = build_stylesheet()
 
 class SetupDialog(QDialog):
     def __init__(self):
@@ -918,12 +903,14 @@ class Dashboard(QWidget):
             "Enter scores and take attendance for classes assigned to your account." if self.is_teacher
             else "Offline-first school administration • Local database"
         ))
-        self.cards = QHBoxLayout()
+        self.cards = QGridLayout()
+        self.cards.setSpacing(12)
         layout.addLayout(self.cards)
         actions_heading = QLabel("Quick actions")
-        actions_heading.setStyleSheet("font-size:14pt;font-weight:700;color:#102a43;")
+        actions_heading.setObjectName("subheading")
         layout.addWidget(actions_heading)
-        actions = QHBoxLayout()
+        actions = QGridLayout()
+        actions.setSpacing(10)
         actions_to_show = (
             (("Grade entry", "Grade Entry"), ("Attendance", "Attendance")) if self.is_teacher else (
             ("Students", "Students"),
@@ -938,13 +925,17 @@ class Dashboard(QWidget):
             ("Timetable", "Timetable"),
             )
         )
-        for label, page_name in actions_to_show:
+        for position, (label, page_name) in enumerate(actions_to_show):
             button = QPushButton(label)
             button.setObjectName("dashboardAction")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(f"Open {label.lower()}")
             button.clicked.connect(
                 lambda checked=False, target=page_name: self.navigation_requested.emit(target)
             )
-            actions.addWidget(button)
+            actions.addWidget(button, position // 4, position % 4)
+        for column in range(4):
+            actions.setColumnStretch(column, 1)
         layout.addLayout(actions)
         layout.addStretch()
         if not self.is_teacher:
@@ -971,17 +962,20 @@ class Dashboard(QWidget):
             item = self.cards.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        for label, count in counts.items():
+        for position, (label, count) in enumerate(counts.items()):
             card = QFrame()
-            card.setStyleSheet("QFrame { background:white; border:1px solid #d9e0ea; border-radius:10px; }")
+            card.setObjectName("card")
             col = QVBoxLayout(card)
+            col.setContentsMargins(16, 12, 16, 12)
             title = QLabel(label)
-            title.setObjectName("muted")
+            title.setObjectName("cardLabel")
             number = QLabel(str(count))
-            number.setStyleSheet("font-size:25pt;font-weight:700;color:#155eef;")
+            number.setObjectName("cardValue")
             col.addWidget(title)
             col.addWidget(number)
-            self.cards.addWidget(card)
+            self.cards.addWidget(card, position // 4, position % 4)
+        for column in range(4):
+            self.cards.setColumnStretch(column, 1)
 
 
 class DataBackupPage(QWidget):
@@ -1358,9 +1352,20 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(220)
         nav = QVBoxLayout(sidebar)
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(0)
         brand = QLabel("SMARTSCHOOL\nMANAGER")
-        brand.setStyleSheet("color:white;font-size:15pt;font-weight:800;padding:18px 10px;")
+        brand.setObjectName("brand")
         nav.addWidget(brand)
+        brand_sub = QLabel("Offline • Local database")
+        brand_sub.setObjectName("brandSub")
+        nav.addWidget(brand_sub)
+        self.nav_filter = QLineEdit()
+        self.nav_filter.setPlaceholderText("Find a page…  (Ctrl+K)")
+        self.nav_filter.setClearButtonEnabled(True)
+        self.nav_filter.textChanged.connect(self._filter_nav)
+        nav.addWidget(self.nav_filter)
+        self._nav_buttons = {}
         self.stack = QStackedWidget()
         self.pages = {}
         self._page_factories = {}
@@ -1389,6 +1394,8 @@ class MainWindow(QMainWindow):
                 button = QPushButton(name)
                 button.setObjectName("nav")
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.setToolTip(f"Open {name}")
+                self._nav_buttons[name] = button
                 button.clicked.connect(lambda checked=False, n=name: self.show_page(n))
                 page_layout.addWidget(button)
                 self._nav_tab_for_page[name] = tab_index
@@ -1405,18 +1412,30 @@ class MainWindow(QMainWindow):
         nav.addStretch()
         who = QLabel(f"Signed in: {self.user['username']}\nRole: {self.user['role']}")
         who.setWordWrap(True)
-        who.setStyleSheet("color:#d9e6f2;background:transparent;padding:12px;")
+        who.setContentsMargins(12, 10, 12, 12)
         nav.addWidget(who)
         root_layout.addWidget(sidebar)
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("SMARTSCHOOL MANAGER  /  OFFLINE"))
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        top_bar = QFrame()
+        top_bar.setObjectName("topBar")
+        top = QHBoxLayout(top_bar)
+        top.setContentsMargins(20, 10, 20, 10)
+        self.page_title = QLabel("Dashboard")
+        self.page_title.setObjectName("pageTitle")
+        top.addWidget(self.page_title)
         top.addStretch()
+        refresh_button = QPushButton("Refresh")
+        refresh_button.setToolTip("Reload the current page (F5)")
+        refresh_button.clicked.connect(self.refresh_current_page)
+        top.addWidget(refresh_button)
         logout = QPushButton("Sign out")
+        logout.setToolTip("Close the application")
         logout.clicked.connect(self.close)
         top.addWidget(logout)
-        content_layout.addLayout(top)
+        content_layout.addWidget(top_bar)
         page_scroll = QScrollArea()
         page_scroll.setObjectName("pageScroll")
         page_scroll.setWidgetResizable(True)
@@ -1425,6 +1444,41 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(page_scroll)
         root_layout.addWidget(content)
         self.setCentralWidget(root)
+        self._current_page_name = "Dashboard"
+        self._set_active_nav("Dashboard")
+        self.statusBar().showMessage(f"Signed in as {self.user['username']} ({self.user['role']}) • Offline")
+        self._shortcuts = [
+            QShortcut(QKeySequence("F5"), self, activated=self.refresh_current_page),
+            QShortcut(QKeySequence("Ctrl+K"), self, activated=self._focus_nav_filter),
+        ]
+
+    def _focus_nav_filter(self):
+        self.nav_filter.setFocus()
+        self.nav_filter.selectAll()
+
+    def _filter_nav(self, text):
+        needle = text.strip().casefold()
+        for name, button in self._nav_buttons.items():
+            button.setVisible(not needle or needle in name.casefold())
+
+    def _set_active_nav(self, name):
+        for page_name, button in self._nav_buttons.items():
+            wanted = "navActive" if page_name == name else "nav"
+            if button.objectName() != wanted:
+                button.setObjectName(wanted)
+                button.style().unpolish(button)
+                button.style().polish(button)
+        self.page_title.setText(name)
+
+    def refresh_current_page(self):
+        try:
+            page = self.pages.get(self._current_page_name)
+            refresh = getattr(page, "refresh", None)
+            if callable(refresh):
+                refresh()
+                self.statusBar().showMessage(f"{self._current_page_name} refreshed", 3000)
+        except Exception as exc:  # a failed refresh must never close the app
+            self.statusBar().showMessage(f"Could not refresh: {exc}", 6000)
 
     def show_page(self, name):
         if self.user["role"] == "teacher" and name not in {"Dashboard", "Grade Entry", "Attendance"}:
@@ -1432,6 +1486,8 @@ class MainWindow(QMainWindow):
         tab_index = self._nav_tab_for_page.get(name)
         if tab_index is not None:
             self._nav_tabs.setCurrentIndex(tab_index)
+        self._current_page_name = name
+        self._set_active_nav(name)
         page = self.pages.get(name)
         created_now = page is None
         if page is None:
@@ -1515,6 +1571,7 @@ def run_app():
     import logging
     from logging.handlers import RotatingFileHandler
 
+    install_polish()
     db.APP_DIR.mkdir(parents=True, exist_ok=True)
     root_logger = logging.getLogger()
     if not root_logger.handlers:
@@ -1570,5 +1627,4 @@ def run_app():
     if login.exec() != QDialog.DialogCode.Accepted:
         raise SystemExit(0)
     window = MainWindow(login.user)
-    window.setStyleSheet(STYLE)
     return window
