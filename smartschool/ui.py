@@ -886,6 +886,14 @@ class ModulePage(QWidget):
         else:
             QMessageBox.information(self, "Export complete", "CSV export finished.")
 
+def _load_dashboard_payload(include_setup):
+    from . import dashboard_data
+    payload = {"counts": db.counts(), "overview": dashboard_data.load_dashboard_overview()}
+    if include_setup:
+        payload["checklist"] = dashboard_data.load_setup_checklist()
+    return payload
+
+
 class Dashboard(QWidget):
     navigation_requested = pyqtSignal(str)
 
@@ -895,17 +903,50 @@ class Dashboard(QWidget):
         self._refresh_id = 0
         self._workers = {}
         self._thread_pool = QThreadPool.globalInstance()
+        self._checklist = None
+        self._guide_offered = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
         heading = QLabel("Teacher workspace" if self.is_teacher else "School overview")
         heading.setObjectName("heading")
         layout.addWidget(heading)
-        layout.addWidget(QLabel(
+        self.context_label = QLabel(
             "Enter scores and take attendance for classes assigned to your account." if self.is_teacher
-            else "Offline-first school administration • Local database"
-        ))
+            else "Loading the current session…"
+        )
+        self.context_label.setObjectName("muted")
+        layout.addWidget(self.context_label)
+
+        # Setup banner (admins, until the required steps are done)
+        self.setup_banner = QFrame()
+        self.setup_banner.setObjectName("card")
+        banner = QHBoxLayout(self.setup_banner)
+        banner.setContentsMargins(16, 12, 16, 12)
+        banner_text = QVBoxLayout()
+        self.setup_title = QLabel("Finish setting up your school")
+        self.setup_title.setObjectName("subheading")
+        self.setup_hint = wrapped_label("")
+        self.setup_hint.setObjectName("muted")
+        self.setup_progress = QProgressBar()
+        banner_text.addWidget(self.setup_title)
+        banner_text.addWidget(self.setup_hint)
+        banner_text.addWidget(self.setup_progress)
+        banner.addLayout(banner_text, 1)
+        self.setup_button = QPushButton("Continue setup")
+        self.setup_button.setObjectName("primary")
+        self.setup_button.clicked.connect(self.open_setup_guide)
+        banner.addWidget(self.setup_button)
+        self.setup_banner.hide()
+        layout.addWidget(self.setup_banner)
+
         self.cards = QGridLayout()
         self.cards.setSpacing(12)
         layout.addLayout(self.cards)
+        self.insights = QGridLayout()
+        self.insights.setSpacing(12)
+        layout.addLayout(self.insights)
+
         actions_heading = QLabel("Quick actions")
         actions_heading.setObjectName("subheading")
         layout.addWidget(actions_heading)
@@ -923,6 +964,8 @@ class Dashboard(QWidget):
             ("Data backup", "Data Backup"),
             ("Attendance", "Attendance"),
             ("Timetable", "Timetable"),
+            ("Fee invoices", "Fee Invoices"),
+            ("School profile", "School Profile"),
             )
         )
         for position, (label, page_name) in enumerate(actions_to_show):
@@ -946,36 +989,112 @@ class Dashboard(QWidget):
             return
         self._refresh_id += 1
         request_id = self._refresh_id
-        worker = BackgroundTask(request_id, db.counts)
-        worker.signals.finished.connect(self._counts_loaded)
+        worker = BackgroundTask(request_id, lambda: _load_dashboard_payload(True))
+        worker.signals.finished.connect(self._payload_loaded)
         self._workers[request_id] = worker
         self._thread_pool.start(worker)
 
-    def _counts_loaded(self, request_id, counts, error):
+    @staticmethod
+    def _clear(grid):
+        while grid.count():
+            item = grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    @staticmethod
+    def _card(label, value, note=""):
+        card = QFrame()
+        card.setObjectName("card")
+        col = QVBoxLayout(card)
+        col.setContentsMargins(16, 12, 16, 12)
+        title = QLabel(label)
+        title.setObjectName("cardLabel")
+        number = QLabel(str(value))
+        number.setObjectName("cardValue")
+        col.addWidget(title)
+        col.addWidget(number)
+        if note:
+            hint = QLabel(note)
+            hint.setObjectName("hint")
+            hint.setWordWrap(True)
+            col.addWidget(hint)
+        return card
+
+    def _payload_loaded(self, request_id, payload, error):
         self._workers.pop(request_id, None)
         if request_id != self._refresh_id:
             return
         if error is not None:
             QMessageBox.warning(self, "Could not load dashboard", str(error))
             return
-        while self.cards.count():
-            item = self.cards.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        for position, (label, count) in enumerate(counts.items()):
-            card = QFrame()
-            card.setObjectName("card")
-            col = QVBoxLayout(card)
-            col.setContentsMargins(16, 12, 16, 12)
-            title = QLabel(label)
-            title.setObjectName("cardLabel")
-            number = QLabel(str(count))
-            number.setObjectName("cardValue")
-            col.addWidget(title)
-            col.addWidget(number)
-            self.cards.addWidget(card, position // 4, position % 4)
+        try:
+            self._render(payload)
+        except Exception as exc:  # never let a display problem close the app
+            self.context_label.setText(f"Dashboard could not be displayed: {exc}")
+
+    def _render(self, payload):
+        overview = payload["overview"]
+        if overview["session"] and overview["term"]:
+            self.context_label.setText(f"{overview['session']} session • {overview['term']} • {overview['today']}")
+        else:
+            self.context_label.setText("No current session or term is set yet. Open the Academic calendar to choose them.")
+        self._clear(self.cards)
+        for position, (label, count) in enumerate(payload["counts"].items()):
+            self.cards.addWidget(self._card(label, count), 0, position)
         for column in range(4):
             self.cards.setColumnStretch(column, 1)
+
+        self._clear(self.insights)
+        attendance = overview["attendance"]
+        taken_note = (
+            f"{attendance['classes_taken']} of {attendance['classes_total']} classes have a register today"
+            if attendance["classes_total"] else "No classes yet"
+        )
+        gender = overview["gender"]
+        gender_note = " • ".join(f"{name}: {count}" for name, count in gender.items()) or "No enrolled students yet"
+        fee_note = f"{overview['fees']['draft_batches']} draft batch(es) waiting for review"
+        insight_cards = (
+            ("Enrolled this session", overview["enrolled"], gender_note),
+            ("Present today", attendance["present"], f"{attendance['absent']} absent • {taken_note}"),
+            ("Invoices issued this term", overview["fees"]["issued_invoices"], fee_note),
+            ("Results awaiting approval", overview["results"]["awaiting_approval"], "Subjects with results not yet approved this term"),
+        )
+        for position, (label, value, note) in enumerate(insight_cards):
+            self.insights.addWidget(self._card(label, value, note), 0, position)
+        for column in range(4):
+            self.insights.setColumnStretch(column, 1)
+
+        self._checklist = payload.get("checklist")
+        self._update_setup_banner()
+
+    def _update_setup_banner(self):
+        checklist = self._checklist
+        if not checklist or checklist["complete"]:
+            self.setup_banner.hide()
+            return
+        done, total = checklist["required_done"], checklist["required_total"]
+        self.setup_progress.setRange(0, total)
+        self.setup_progress.setValue(done)
+        self.setup_progress.setFormat(f"{done} of {total} required steps done")
+        next_step = checklist["next_step"]
+        self.setup_hint.setText(f"Next: {next_step['title']} — {next_step['why']}" if next_step else "")
+        self.setup_button.setText("Start setup" if done == 0 else "Continue setup")
+        self.setup_banner.show()
+        if done == 0 and not self._guide_offered:
+            self._guide_offered = True  # offer the guide once, on a brand-new school
+            QTimer.singleShot(300, self.open_setup_guide)
+
+    def open_setup_guide(self):
+        from .setup_guide_ui import SetupGuideDialog
+        try:
+            dialog = SetupGuideDialog(self, self._checklist)
+            dialog.exec()
+            page = dialog.selected_page
+        except Exception as exc:
+            QMessageBox.warning(self, "Setup guide", f"The setup guide could not open: {exc}")
+            return
+        if page:
+            self.navigation_requested.emit(page)
 
 
 class DataBackupPage(QWidget):
