@@ -27,7 +27,7 @@ def test_student_import_accepts_optional_fields_and_skips_blank_lines(tmp_path):
         {" FIRST_NAME ": "", "last_name": "", "gender": "", "guardian_phone": ""},
     ])
     assert preview_student_import(path) == {
-        "row_count": 2,
+        "row_count": 2, "warnings": [],
         "rows": [
             {"first_name": "Amina", "last_name": "Okafor", "gender": "Female", "guardian_phone": "555-0101", "nin": "", "date_of_birth": "", "email": ""},
             {"first_name": "Musa", "last_name": "Bello", "gender": "", "guardian_phone": "", "nin": "", "date_of_birth": "", "email": ""},
@@ -48,7 +48,6 @@ def test_student_import_accepts_optional_nin_birth_date_and_email(tmp_path):
 
 @pytest.mark.parametrize(("headers", "rows", "message"), [
     (["first_name", "gender"], [{"first_name": "Amina", "gender": "Female"}], "missing required"),
-    (["first_name", "last_name", "unexpected"], [{"first_name": "Amina", "last_name": "Okafor", "unexpected": "x"}], "unexpected columns"),
     (["first_name", "last_name", "FIRST_NAME"], [{"first_name": "Amina", "last_name": "Okafor", "FIRST_NAME": "A"}], "duplicate column"),
     (["first_name", "last_name"], [{"first_name": "", "last_name": "Okafor"}], "first name is required"),
     (["first_name", "last_name"], [{"first_name": "A" * 101, "last_name": "Okafor"}], "at most 100 characters"),

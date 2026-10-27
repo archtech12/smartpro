@@ -6,6 +6,7 @@ import csv
 import re
 from pathlib import Path
 
+from . import tabular
 from .database import validate_assessment_score
 
 
@@ -44,6 +45,16 @@ def write_score_template(
         raise ValueError("Assessment components are not configured.")
     component_headers = _component_headers(components, subject_code)
     headers = ["admission_no", "first_name", "last_name"] + list(component_headers.values())
+    if Path(path).suffix.lower() == ".xlsx":
+        rows = []
+        for student in students:
+            scores = student.get("scores", {})
+            rows.append(
+                [student.get("admission_no", ""), student.get("first_name", ""), student.get("last_name", "")]
+                + [scores.get(int(component["id"]), "") or "" for component in components]
+            )
+        tabular.write_workbook(path, [{"name": "Scores", "headers": headers, "rows": rows}])
+        return
     with Path(path).open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
         writer.writeheader()
@@ -81,65 +92,61 @@ def preview_score_import(
     component_by_header = {
         component_headers[int(component["id"])]: component for component in components
     }
-    try:
-        with Path(path).open("r", newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle)
-            headers = reader.fieldnames
-            if not headers:
-                raise ValueError("The CSV file is empty or has no header row.")
-            if len(headers) != len(set(headers)):
-                raise ValueError("The CSV file contains duplicate column headings.")
-            missing = [header for header in expected if header not in headers]
-            unknown = [header for header in headers if header not in expected]
-            if missing or unknown:
-                details = []
-                if missing:
-                    details.append("missing: " + ", ".join(missing))
-                if unknown:
-                    details.append("unexpected: " + ", ".join(unknown))
-                raise ValueError("CSV columns do not match this class, subject, and term (" + "; ".join(details) + ").")
+    table = tabular.read_table(path)
+    header_index = next((i for i, row in enumerate(table) if any(row)), None)
+    if header_index is None:
+        raise ValueError("The file is empty or has no heading row.")
+    headers = [h.strip() for h in table[header_index]]
+    while headers and not headers[-1]:
+        headers.pop()
+    lookup = {h.casefold(): i for i, h in enumerate(headers) if h}
+    if len(lookup) != len([h for h in headers if h]):
+        raise ValueError("The file contains duplicate column headings.")
+    missing = [header for header in expected if header.casefold() not in lookup]
+    unknown = [h for h in headers if h and h.casefold() not in {e.casefold() for e in expected}]
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unknown:
+            details.append("unexpected: " + ", ".join(unknown))
+        raise ValueError("The columns do not match this class, subject, and term (" + "; ".join(details) + "). Export the template again.")
 
-            updates = {}
-            seen = set()
-            score_count = 0
-            matched_rows = 0
-            for line_number, row in enumerate(reader, start=2):
-                if None in row:
-                    raise ValueError(f"Row {line_number} has more fields than the header.")
-                if not any((value or "").strip() for value in row.values()):
-                    continue
-                admission_no = (row.get("admission_no") or "").strip()
-                key = admission_no.casefold()
-                if not key:
-                    raise ValueError(f"Row {line_number} has scores but no admission number.")
-                if key in seen:
-                    raise ValueError(f"Admission number {admission_no!r} appears more than once.")
-                student = roster.get(key)
-                if student is None:
-                    raise ValueError(
-                        f"Admission number {admission_no!r} on row {line_number} is not in the selected class roster."
-                    )
-                seen.add(key)
-                matched_rows += 1
-                student_updates = {}
-                for header, component in component_by_header.items():
-                    value = (row.get(header) or "").strip()
-                    if value:
-                        try:
-                            student_updates[int(component["id"])] = validate_assessment_score(
-                                value, component["max_score"]
-                            )
-                        except ValueError as exc:
-                            raise ValueError(
-                                f"Row {line_number}, {header}: {exc}"
-                            ) from exc
-                if student_updates:
-                    updates[int(student["enrollment_id"])] = student_updates
-                    score_count += len(student_updates)
-    except UnicodeDecodeError as exc:
-        raise ValueError("The score file must be a UTF-8 CSV file.") from exc
-    except csv.Error as exc:
-        raise ValueError(f"The CSV file could not be read: {exc}") from exc
+    def cell(cells, header):
+        position = lookup[header.casefold()]
+        return cells[position].strip() if position < len(cells) else ""
+
+    updates = {}
+    seen = set()
+    score_count = 0
+    matched_rows = 0
+    for line_number, cells in enumerate(table[header_index + 1:], start=header_index + 2):
+        if not any(c.strip() for c in cells):
+            continue
+        admission_no = cell(cells, "admission_no")
+        key = admission_no.casefold()
+        if not key:
+            raise ValueError(f"Row {line_number} has scores but no admission number.")
+        if key in seen:
+            raise ValueError(f"Admission number {admission_no!r} appears more than once.")
+        student = roster.get(key)
+        if student is None:
+            raise ValueError(
+                f"Admission number {admission_no!r} on row {line_number} is not in the selected class roster."
+            )
+        seen.add(key)
+        matched_rows += 1
+        student_updates = {}
+        for header, component in component_by_header.items():
+            value = cell(cells, header)
+            if value:
+                try:
+                    student_updates[int(component["id"])] = validate_assessment_score(value, component["max_score"])
+                except ValueError as exc:
+                    raise ValueError(f"Row {line_number}, {header}: {exc}") from exc
+        if student_updates:
+            updates[int(student["enrollment_id"])] = student_updates
+            score_count += len(student_updates)
 
     if not updates:
         raise ValueError("No non-blank scores were found. Nothing was imported.")

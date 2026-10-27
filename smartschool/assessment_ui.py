@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
 from . import database as db
+from . import tabular
 from .score_import import preview_score_import, write_score_template
 from .workers import BackgroundTask
 
@@ -103,10 +104,10 @@ class GradeEntryPage(QWidget):
         self.save_button = QPushButton("Save All Grades")
         self.save_button.setObjectName("primary")
         self.save_button.setToolTip("Save all entered scores for this class and subject.")
-        self.template_button = QAction("Export CSV template", self)
-        self.template_button.setToolTip("Export the roster and score columns as a CSV template for spreadsheet editing.")
+        self.template_button = QAction("Export Excel template", self)
+        self.template_button.setToolTip("Export the roster and score columns as an Excel template for editing.")
         self.import_button = QPushButton("Import Scores")
-        self.import_button.setToolTip("Load a CSV score sheet and review imported values before saving.")
+        self.import_button.setToolTip("Load an Excel or CSV score sheet and review imported values before saving.")
         self.approve_button = QAction("Approve and lock results", self)
         self.correct_button = QAction("Correct approved results", self)
         self.more_button = QToolButton()
@@ -525,12 +526,12 @@ class GradeEntryPage(QWidget):
         if not self.template_button.isEnabled():
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export score CSV template", "grade_scores_template.csv", "CSV files (*.csv)"
+            self, "Export score template", "grade_scores_template.xlsx", "Excel workbook (*.xlsx);;CSV files (*.csv)"
         )
         if not path:
             return
-        if not path.casefold().endswith(".csv"):
-            path += ".csv"
+        if not path.casefold().endswith((".csv", ".xlsx")):
+            path += ".xlsx"
         students = []
         for row_index, student in enumerate(self._students):
             scores = {}
@@ -546,7 +547,7 @@ class GradeEntryPage(QWidget):
         self.status.setText(f"Score template saved: {path}")
         QMessageBox.information(
             self, "Score template ready",
-            "Fill in the score columns and import the CSV. Admission number identifies each student. "
+            "Fill in the score columns and import the file. Admission number identifies each student. "
             "The student name columns are for reference only.",
         )
 
@@ -554,7 +555,7 @@ class GradeEntryPage(QWidget):
         if not self.import_button.isEnabled():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import draft scores", "", "CSV files (*.csv);;All files (*)"
+            self, "Import draft scores", "", tabular.SPREADSHEET_FILTER
         )
         if not path:
             return

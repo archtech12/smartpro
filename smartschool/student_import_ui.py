@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
 from . import database as db
+from . import tabular
 from .student_import import preview_student_import
 
 
@@ -36,7 +37,7 @@ class StudentImportDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(wrapped_label(
             "Choose the class placement, academic session, and enrollment date for this file. "
-            "The CSV supplies each student's names and optional contact and identity details."
+            "The Excel or CSV file supplies each student's names and optional contact and identity details."
         ))
         form = QFormLayout()
         self.class_section = QComboBox()
@@ -59,13 +60,13 @@ class StudentImportDialog(QDialog):
         layout.addLayout(form)
 
         file_row = QHBoxLayout()
-        self.choose_file_button = QPushButton("Choose student CSV…")
+        self.choose_file_button = QPushButton("Choose Excel or CSV file…")
         self.file_label = QLabel("No file selected")
         self.file_label.setWordWrap(True)
         file_row.addWidget(self.choose_file_button)
         file_row.addWidget(self.file_label, 1)
         layout.addLayout(file_row)
-        self.status = QLabel("Use the CSV template so the column names match.")
+        self.status = QLabel("Use the template so the column names match. Excel (.xlsx) and CSV files both work.")
         layout.addWidget(self.status)
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
@@ -106,21 +107,29 @@ class StudentImportDialog(QDialog):
 
     def _choose_file(self):
         path, _selected_filter = QFileDialog.getOpenFileName(
-            self, "Choose student CSV", "", "CSV files (*.csv);;All files (*)"
+            self, "Choose student file", "", tabular.SPREADSHEET_FILTER
         )
         if not path:
             return
         try:
-            preview = preview_student_import(path)
-        except (OSError, ValueError) as exc:
-            self._rows = []
-            self._file_path = ""
-            self.file_label.setText("No valid file selected")
-            self.status.setText("The file was not imported.")
-            self.table.setRowCount(0)
-            self.import_button.setEnabled(False)
-            QMessageBox.warning(self, "Student file not accepted", str(exc))
-            return
+            self._load_preview(path)
+        except Exception as exc:  # a bad file must never close the application
+            self._reject_file(str(exc))
+
+    def _reject_file(self, message):
+        self._rows = []
+        self._file_path = ""
+        self.file_label.setText("No valid file selected")
+        self.status.setText("The file was not imported.")
+        self.table.setRowCount(0)
+        self.import_button.setEnabled(False)
+        box = QMessageBox(QMessageBox.Icon.Warning, "Student file not accepted", message.split("\n")[0], parent=self)
+        if "\n" in message:
+            box.setDetailedText(message)
+        box.exec()
+
+    def _load_preview(self, path):
+        preview = preview_student_import(path)
         self._file_path = path
         self._rows = preview["rows"]
         self.file_label.setText(path)
@@ -131,14 +140,15 @@ class StudentImportDialog(QDialog):
                 self.table.setItem(row_index, column, QTableWidgetItem(row[key]))
         self.table.setUpdatesEnabled(True)
         self.table.resizeColumnsToContents()
+        notes = " ".join(preview.get("warnings", []))
         self.status.setText(
-            f"Preview passed: {len(self._rows)} student(s). No records have been saved yet."
+            f"Preview passed: {len(self._rows)} student(s). No records have been saved yet." + (f"  Note: {notes}" if notes else "")
         )
         self.import_button.setEnabled(self.class_section.currentData() is not None and self.session.currentData() is not None)
 
     def _accept_if_ready(self):
         if not self._rows or self.class_section.currentData() is None or self.session.currentData() is None:
-            QMessageBox.information(self, "Choose import details", "Choose a valid CSV, class, and academic session.")
+            QMessageBox.information(self, "Choose import details", "Choose a valid file, class, and academic session.")
             return
         answer = QMessageBox.question(
             self,

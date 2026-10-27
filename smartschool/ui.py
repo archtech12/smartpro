@@ -467,9 +467,9 @@ class ModulePage(QWidget):
         self.import_btn = None
         self.template_btn = None
         if module_name == "Students":
-            self.import_btn = QPushButton("Import students CSV…")
+            self.import_btn = QPushButton("Import students (Excel/CSV)…")
             self.import_btn.clicked.connect(self.import_students_csv)
-            self.template_btn = QPushButton("CSV template")
+            self.template_btn = QPushButton("Excel template")
             self.template_btn.clicked.connect(self.export_student_template)
         self.edit_btn = QPushButton("Edit selected")
         if module_name == "Students":
@@ -477,7 +477,7 @@ class ModulePage(QWidget):
         self.edit_btn.setEnabled(False)
         self.edit_btn.clicked.connect(self.edit_record)
         header.addWidget(self.edit_btn)
-        self.export_btn = QPushButton("Export CSV")
+        self.export_btn = QPushButton("Export Excel / CSV")
         self.export_btn.clicked.connect(self.export)
         header.addWidget(self.export_btn)
         layout.addLayout(header)
@@ -718,15 +718,16 @@ class ModulePage(QWidget):
 
     def export_student_template(self):
         path, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Save student CSV template", "student_registration_template.csv", "CSV files (*.csv)"
+            self, "Save student template", "student_registration_template.xlsx",
+            "Excel workbook (*.xlsx);;CSV files (*.csv)"
         )
         if not path:
             return
-        if not path.casefold().endswith(".csv"):
-            path += ".csv"
+        if not path.casefold().endswith((".csv", ".xlsx")):
+            path += ".xlsx"
         try:
-            write_student_template(path)
-        except OSError as exc:
+            path = str(write_student_template(path))
+        except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not save template", str(exc))
             return
         self.page_status.setText(f"Student template saved: {path}")
@@ -864,15 +865,20 @@ class ModulePage(QWidget):
         self.refresh()
 
     def export(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", f"{self.module_name.lower()}.csv", "CSV files (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export records", f"{self.module_name.lower()}.xlsx", "Excel workbook (*.xlsx);;CSV files (*.csv)"
+        )
         if not path:
             return
+        if not path.casefold().endswith((".csv", ".xlsx")):
+            path += ".xlsx"
         self._start_export(path)
 
     def _start_export(self, path):
         self._export_id += 1
         export_id = self._export_id
-        worker = BackgroundTask(export_id, lambda: db.export_csv(self.module_name, path))
+        exporter = db.export_module_xlsx if path.casefold().endswith(".xlsx") else db.export_csv
+        worker = BackgroundTask(export_id, lambda: exporter(self.module_name, path))
         worker.signals.finished.connect(self._export_finished)
         self._export_workers[export_id] = worker
         self.export_btn.setEnabled(False)
@@ -882,11 +888,11 @@ class ModulePage(QWidget):
     def _export_finished(self, export_id, _result, error):
         self._export_workers.pop(export_id, None)
         self.export_btn.setEnabled(True)
-        self.export_btn.setText("Export CSV")
+        self.export_btn.setText("Export Excel / CSV")
         if error is not None:
             QMessageBox.warning(self, "Export failed", str(error))
         else:
-            QMessageBox.information(self, "Export complete", "CSV export finished.")
+            QMessageBox.information(self, "Export complete", "Export finished. Excel opens .xlsx and .csv files directly.")
 
 def _load_dashboard_payload(username):
     from . import dashboard_data

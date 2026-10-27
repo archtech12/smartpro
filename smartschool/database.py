@@ -3648,6 +3648,27 @@ def export_csv(module_name: str, path: str) -> None:
             writer.writerow([spreadsheet_safe(row[column]) for column in columns])
 
 
+def export_module_rows(module_name: str) -> tuple[list[str], list[list]]:
+    """Column headings and every row of one record module, for spreadsheet export."""
+    _authorized(module_name, None)
+    spec = MODULES[module_name]
+    columns = [field[0] for field in spec["fields"]]
+    with connection() as db:
+        rows = [[row[column] for column in columns] for row in db.execute(
+            f"SELECT {','.join(columns)} FROM {spec['table']} ORDER BY id")]
+    return columns, rows
+
+
+def export_module_xlsx(module_name: str, path: str) -> str:
+    """Write one record module to an Excel workbook (all cells text; formulas neutralised)."""
+    from . import tabular
+
+    headings, rows = export_module_rows(module_name)
+    text_columns = [h for h in headings if h in {"guardian_phone", "phone", "nin", "admission_no", "staff_no"}]
+    saved = tabular.write_workbook(path, [{"name": module_name, "headers": headings, "rows": rows, "text_columns": text_columns}])
+    return str(saved)
+
+
 def _attendance_roster(conn: sqlite3.Connection, session_id: int, class_id: int, attendance_date: str):
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in (session_id, class_id)):
         raise ValueError("Select a valid academic session and class.")
