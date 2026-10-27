@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -757,6 +757,18 @@ def _migration_25(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 25")
 
 
+def _migration_26(conn: sqlite3.Connection) -> None:
+    """Printable term closing and next-term dates for report cards."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(school_profile)")}
+    for column in ("term_closing_date", "next_term_begins"):
+        if column not in columns:
+            conn.execute(
+                f"ALTER TABLE school_profile ADD COLUMN {column} TEXT NOT NULL DEFAULT '' CHECK(length({column})<=10)"
+            )
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(26)")
+    conn.execute("PRAGMA user_version = 26")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -819,6 +831,8 @@ def initialize() -> None:
                 _migration_24(conn)
             elif next_version == 25:
                 _migration_25(conn)
+            elif next_version == 26:
+                _migration_26(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()
@@ -876,10 +890,13 @@ REPORT_RANKING_STYLES = {
 
 def _report_settings_in_transaction(conn: sqlite3.Connection) -> dict:
     row = conn.execute(
-        "SELECT report_ranking_style,head_signature,class_teacher_signature FROM school_profile WHERE id=1"
+        "SELECT report_ranking_style,head_signature,class_teacher_signature,term_closing_date,next_term_begins "
+        "FROM school_profile WHERE id=1"
     ).fetchone()
     return {
         "ranking_style": row["report_ranking_style"],
+        "term_closing_date": row["term_closing_date"],
+        "next_term_begins": row["next_term_begins"],
         "head_signature": bytes(row["head_signature"]) if row["head_signature"] else None,
         "class_teacher_signature": bytes(row["class_teacher_signature"]) if row["class_teacher_signature"] else None,
     }
@@ -906,8 +923,16 @@ def _validated_image(data, label: str):
 def save_school_profile(
     profile: dict[str, str], actor: str, logo_data=_LOGO_UNCHANGED, *,
     report_ranking_style=_LOGO_UNCHANGED, head_signature=_LOGO_UNCHANGED,
-    class_teacher_signature=_LOGO_UNCHANGED,
+    class_teacher_signature=_LOGO_UNCHANGED, term_closing_date=_LOGO_UNCHANGED,
+    next_term_begins=_LOGO_UNCHANGED,
 ) -> None:
+    term_dates = {}
+    for column, value, label in (
+        ("term_closing_date", term_closing_date, "Term closing date"),
+        ("next_term_begins", next_term_begins, "Next term begins"),
+    ):
+        if value is not _LOGO_UNCHANGED:
+            term_dates[column] = _iso_date(value, label).isoformat() if value else ""
     values = {}
     for field, max_length in SCHOOL_PROFILE_FIELDS:
         value = profile.get(field, "")
@@ -944,12 +969,44 @@ def save_school_profile(
         if report_ranking_style is not _LOGO_UNCHANGED:
             extra_clause += ",report_ranking_style=?"
             params.append(report_ranking_style)
+        for column, value in term_dates.items():
+            extra_clause += f",{column}=?"
+            params.append(value)
         params.append(actor)
         conn.execute(
             f"UPDATE school_profile SET {columns}{extra_clause},updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",
             params,
         )
         _audit_in_transaction(conn, actor, "UPDATE", "school_profile", 1)
+
+
+def load_audit_log(actor: str, starts_on: str = "", ends_on: str = "", action: str = "", search: str = "", limit: int = 500) -> dict:
+    """Administrator-only, read-only view of the audit trail (newest first)."""
+    where, params = [], []
+    if starts_on:
+        where.append("date(created_at)>=?")
+        params.append(_iso_date(starts_on, "Start date").isoformat())
+    if ends_on:
+        where.append("date(created_at)<=?")
+        params.append(_iso_date(ends_on, "End date").isoformat())
+    if action:
+        where.append("action=?")
+        params.append(str(action))
+    if search and search.strip():
+        like = "%" + search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(username LIKE ? ESCAPE '\\' OR entity LIKE ? ESCAPE '\\' OR entity_id LIKE ? ESCAPE '\\')")
+        params += [like, like, like]
+    limit = max(1, min(int(limit), 2000))
+    clause = " WHERE " + " AND ".join(where) if where else ""
+    with connection() as conn:
+        _require_admin(conn, actor)
+        total = conn.execute(f"SELECT COUNT(*) FROM audit_log{clause}", params).fetchone()[0]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT id,created_at,username,action,entity,entity_id FROM audit_log{clause} ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        )]
+        actions = [r[0] for r in conn.execute("SELECT DISTINCT action FROM audit_log ORDER BY action")]
+    return {"rows": rows, "total": int(total), "actions": actions, "limit": limit}
 
 
 def create_user(username: str, password_hash: str, role: str = "admin") -> None:

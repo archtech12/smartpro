@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QThreadPool
+from PyQt6.QtCore import QBuffer, QByteArray, QDate, QIODevice, QThreadPool
 from PyQt6.QtGui import QImageReader
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDateEdit, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
 from . import database as db
@@ -82,6 +82,20 @@ class SchoolProfilePage(QWidget):
         self.ranking_style.setEnabled(self.is_admin)
         style_row.addWidget(self.ranking_style, 1)
         layout.addLayout(style_row)
+        term_row = QFormLayout()
+        self.term_dates = {}
+        for key, label in (("term_closing_date", "Term closes on"), ("next_term_begins", "Next term begins on")):
+            edit = QDateEdit()
+            edit.setCalendarPopup(True)
+            edit.setDisplayFormat("dd MMM yyyy")
+            edit.setMinimumDate(QDate(2000, 1, 1))   # the minimum date means "not set"
+            edit.setSpecialValueText("Not set")
+            edit.setDate(edit.minimumDate())
+            edit.setEnabled(self.is_admin)
+            edit.setToolTip("Printed on report cards. Pick the minimum date (or press Delete) to leave it blank.")
+            self.term_dates[key] = edit
+            term_row.addRow(label, edit)
+        layout.addLayout(term_row)
         for key, label in (("class_teacher_signature", "Class teacher signature"), ("head_signature", "Head of school signature")):
             row = QHBoxLayout()
             status = QLabel(f"No {label.lower()} selected")
@@ -126,6 +140,9 @@ class SchoolProfilePage(QWidget):
         self._logo_name = ""
         self.logo_status.setText("A logo is saved in this local database" if self._logo_data else "No school logo selected")
         self.ranking_style.setCurrentIndex(max(0, self.ranking_style.findData(report_settings["ranking_style"])))
+        for key, edit in self.term_dates.items():
+            parsed = QDate.fromString(report_settings.get(key, ""), "yyyy-MM-dd")
+            edit.setDate(parsed if parsed.isValid() else edit.minimumDate())
         for key, label in (("class_teacher_signature", "class teacher signature"), ("head_signature", "head of school signature")):
             self._signatures[key] = report_settings[key]
             self._signature_status[key].setText(
@@ -222,12 +239,17 @@ class SchoolProfilePage(QWidget):
         logo_data = self._logo_data
         ranking_style = self.ranking_style.currentData()
         signatures = dict(self._signatures)
+        term_dates = {
+            key: ("" if edit.date() == edit.minimumDate() else edit.date().toString("yyyy-MM-dd"))
+            for key, edit in self.term_dates.items()
+        }
         worker = BackgroundTask(
             task_id,
             lambda: db.save_school_profile(
                 profile, self.username, logo_data, report_ranking_style=ranking_style,
                 head_signature=signatures["head_signature"],
                 class_teacher_signature=signatures["class_teacher_signature"],
+                term_closing_date=term_dates["term_closing_date"], next_term_begins=term_dates["next_term_begins"],
             ),
         )
         worker.signals.finished.connect(self._saved)

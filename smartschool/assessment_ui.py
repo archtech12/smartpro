@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from html import escape
 
@@ -951,6 +952,17 @@ class GradeEntryPage(QWidget):
         return f"<table class='signatures'><tr>{''.join(cells)}</tr></table>"
 
     @staticmethod
+    def _term_dates_html(settings):
+        parts = []
+        for key, label in (("term_closing_date", "Term closes"), ("next_term_begins", "Next term begins")):
+            value = (settings or {}).get(key) or ""
+            try:
+                parts.append(f"{label}: {date.fromisoformat(value).strftime('%d %B %Y').lstrip('0')}")
+            except ValueError:
+                continue
+        return "<br>" + " &nbsp;·&nbsp; ".join(parts) if parts else ""
+
+    @staticmethod
     def _report_card_html(data, font_size=9, pad=4, show_remark=True):
         student = data["student"]
         profile = data.get("school_profile", {})
@@ -994,6 +1006,7 @@ class GradeEntryPage(QWidget):
         shows_position = style != "average_grade" and bool(position) and bool(overall and overall["complete"])
         position_note = " Class position ranks the unrounded overall average; equal averages share a position." if shows_position else ""
         remark_header = "<th>Remark</th>" if show_remark else ""
+        term_dates = GradeEntryPage._term_dates_html(settings)
         photo = "<td width='84' align='right'><img src='student-photo'></td>" if photo_data else ""
         html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
           body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; }}
@@ -1012,7 +1025,7 @@ class GradeEntryPage(QWidget):
           <h1>Student Report Card</h1>
           <table class="info"><tr><td><b>{name}</b> &nbsp; Admission No.: {escape(student['admission_no'])}<br>
           Class: {escape(data['class_name'])} {escape(data['section'])}{stage}<br>
-          Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}</td>{photo}</tr></table>
+          Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}{term_dates}</td>{photo}</tr></table>
           <table class="grades"><thead><tr><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th>{remark_header}</tr></thead>
           <tbody>{rows}</tbody></table>
           {summary}{key_html}

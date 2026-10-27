@@ -877,7 +877,10 @@ def test_report_card_data_carries_stage_key_style_and_signatures(grade_entry_db)
         {"grade_label": "P", "remark": "Pass", "from_text": "50"},
         {"grade_label": "F", "remark": "Needs support", "from_text": "0"},
     ]
-    assert card["report_settings"] == {"ranking_style": "position", "head_signature": None, "class_teacher_signature": None}
+    assert card["report_settings"] == {
+        "ranking_style": "position", "head_signature": None, "class_teacher_signature": None,
+        "term_closing_date": "", "next_term_begins": "",
+    }
     png = b"\x89PNG\r\n\x1a\n" + b"synthetic"
     db.save_school_profile({}, "admin", report_ranking_style="average_grade", head_signature=png)
     card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
@@ -1008,3 +1011,18 @@ def test_report_card_with_impossibly_many_subjects_is_refused_not_split(grade_en
         card["subjects"] = [dict(template, subject_code=f"Z{n}", subject_name=f"Subject {n}") for n in range(400)]
     with pytest.raises(ValueError, match="too many subjects to fit on one page"):
         GradeEntryPage._render_class_report_cards_pdf(data, str(ids["tmp"] / "too-many.pdf"))
+
+
+def test_report_card_html_prints_term_closing_and_next_term_dates_only_when_set(grade_entry_db):
+    pytest.importorskip("PyQt6")
+    from smartschool.assessment_ui import GradeEntryPage
+
+    ids = grade_entry_db
+    people = _two_subject_class(ids)
+    card = _approved_card(ids, people)
+    assert "Term closes" not in GradeEntryPage._report_card_html(card)
+    db.save_school_profile({}, "admin", term_closing_date="2026-12-18", next_term_begins="2027-01-05")
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
+    html = GradeEntryPage._report_card_html(card)
+    assert "Term closes: 18 December 2026" in html and "Next term begins: 5 January 2027" in html
+    assert GradeEntryPage._term_dates_html({"term_closing_date": "not-a-date", "next_term_begins": ""}) == ""

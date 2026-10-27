@@ -160,6 +160,7 @@ PNG_PIXEL = base64.b64decode(
 def test_report_ranking_style_defaults_to_position_and_is_validated(school_profile_db):
     assert db.load_report_settings() == {
         "ranking_style": "position", "head_signature": None, "class_teacher_signature": None,
+        "term_closing_date": "", "next_term_begins": "",
     }
     db.save_school_profile({"school_name": "Synthetic School"}, "admin", report_ranking_style="average_grade")
     assert db.load_report_settings()["ranking_style"] == "average_grade"
@@ -211,11 +212,14 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
 
     with db.connection() as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-3:] == [23, 24, 25]
+        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-4:] == [23, 24, 25, 26]
         assert "lump_sum_number" in {row[1] for row in conn.execute("PRAGMA table_info(fee_payments)")}
     assert db.load_school_profile()["school_name"] == "Kept School"
     assert db.load_school_logo() == PNG_PIXEL
-    assert db.load_report_settings() == {"ranking_style": "position", "head_signature": None, "class_teacher_signature": None}
+    assert db.load_report_settings() == {
+        "ranking_style": "position", "head_signature": None, "class_teacher_signature": None,
+        "term_closing_date": "", "next_term_begins": "",
+    }
     backups = list(tmp_path.glob("school.pre-migration-v22-*.db"))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as backup:

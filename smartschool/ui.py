@@ -28,6 +28,7 @@ from .user_accounts_ui import UserAccountsPage
 from .diagnostics_ui import DiagnosticsPage
 from .fees_ui import FeeInvoicePage, FeeReconciliationPage, FeeSetupPage
 from .communication_ui import CommunicationCenterPage
+from .security_ui import AuditLogPage, ChangePasswordDialog
 from .security import hash_password, verify_password
 from .workers import BackgroundTask
 from .student_import import write_student_template
@@ -1599,7 +1600,7 @@ class MainWindow(QMainWindow):
         else:
             tab_specs = [
                 ("Main", ["Dashboard", *db.MODULES.keys(), "Enrollments", "Grade Entry", "Attendance", "Timetable", "Fee Invoices", "Transaction History", "Communication Center"]),
-                ("Settings", ["School Profile", "Academic Calendar", "Legacy Class Review", "Class Stages", "Class Subjects", "Grade Bands", "Assessment Setup", "Fee Setup", "User Accounts", "Data Backup", "Database Diagnostics"]),
+                ("Settings", ["School Profile", "Academic Calendar", "Legacy Class Review", "Class Stages", "Class Subjects", "Grade Bands", "Assessment Setup", "Fee Setup", "User Accounts", "Audit Log", "Data Backup", "Database Diagnostics"]),
             ]
         for tab_index, (tab_name, page_names) in enumerate(tab_specs):
             page = QWidget()
@@ -1628,8 +1629,13 @@ class MainWindow(QMainWindow):
         nav.addStretch()
         who = QLabel(f"Signed in: {self.user['username']}\nRole: {self.user['role']}")
         who.setWordWrap(True)
-        who.setContentsMargins(12, 10, 12, 12)
+        who.setContentsMargins(12, 10, 12, 4)
         nav.addWidget(who)
+        password_button = QPushButton("Change my password")
+        password_button.setObjectName("nav")
+        password_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        password_button.clicked.connect(self.change_password)
+        nav.addWidget(password_button)
         root_layout.addWidget(sidebar)
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -1667,6 +1673,12 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence("F5"), self, activated=self.refresh_current_page),
             QShortcut(QKeySequence("Ctrl+K"), self, activated=self._focus_nav_filter),
         ]
+
+    def change_password(self):
+        try:
+            ChangePasswordDialog(self.user["username"], self).exec()
+        except Exception as exc:
+            QMessageBox.warning(self, "Change password", str(exc))
 
     def _focus_nav_filter(self):
         self.nav_filter.setFocus()
@@ -1745,6 +1757,8 @@ class MainWindow(QMainWindow):
             page.refresh()
         elif name == "Communication Center" and not created_now:
             page.refresh()
+        elif name == "Audit Log" and not created_now:
+            page.refresh()
 
     def _create_page(self, name):
         if name == "School Profile":
@@ -1759,6 +1773,8 @@ class MainWindow(QMainWindow):
             return FeeInvoicePage(self.user["username"], self.user["role"])
         if name == "Transaction History":
             return FeeReconciliationPage(self.user["username"], self.user["role"])
+        if name == "Audit Log":
+            return AuditLogPage(self.user["username"], self.user["role"])
         if name == "Communication Center":
             return CommunicationCenterPage(self.user["username"], self.user["role"])
         if name in db.MODULES:
