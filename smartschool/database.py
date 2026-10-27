@@ -3065,7 +3065,7 @@ def register_students_bulk(
         if not isinstance(student, dict):
             raise ValueError(f"Student row {index} is invalid.")
         values = {}
-        for field, limit in (("first_name", 100), ("last_name", 100), ("gender", 30), ("guardian_phone", 60)):
+        for field, limit in (("admission_no", 100), ("first_name", 100), ("last_name", 100), ("gender", 30), ("guardian_phone", 60)):
             value = student.get(field, "")
             if not isinstance(value, str):
                 raise ValueError(f"Student row {index}: {field.replace('_', ' ')} must be text.")
@@ -3082,6 +3082,9 @@ def register_students_bulk(
         if not values["first_name"] or not values["last_name"]:
             raise ValueError(f"Student row {index}: first and last name are required.")
         normalized_students.append(values)
+    supplied_numbers = [row["admission_no"].casefold() for row in normalized_students if row["admission_no"]]
+    if len(supplied_numbers) != len(set(supplied_numbers)):
+        raise ValueError("The import contains duplicate admission numbers.")
     enrolled_on = _iso_date(enrolled_on, "Enrollment date").isoformat()
 
     with connection() as conn:
@@ -3100,13 +3103,19 @@ def register_students_bulk(
             raise ValueError("Select an existing class and section.")
         class_label = " ".join(part for part in (class_row["class_name"], class_row["section"]) if part)
         next_number = int(conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM students").fetchone()[0])
+        for admission_no in (row["admission_no"] for row in normalized_students if row["admission_no"]):
+            if conn.execute("SELECT 1 FROM students WHERE admission_no=? COLLATE NOCASE", (admission_no,)).fetchone():
+                raise ValueError(f"Admission number {admission_no!r} is already in use.")
         admission_numbers = []
         for student in normalized_students:
             year = enrolled_on[:4]
-            admission_no = f"ADM-{year}-{next_number:05d}"
-            while conn.execute("SELECT 1 FROM students WHERE admission_no=?", (admission_no,)).fetchone():
-                next_number += 1
+            admission_no = student["admission_no"]
+            if not admission_no:
                 admission_no = f"ADM-{year}-{next_number:05d}"
+                while conn.execute("SELECT 1 FROM students WHERE admission_no=?", (admission_no,)).fetchone():
+                    next_number += 1
+                    admission_no = f"ADM-{year}-{next_number:05d}"
+                next_number += 1
             cursor = conn.execute(
                 "INSERT INTO students(admission_no,first_name,last_name,gender,class_name,guardian_phone,nin,date_of_birth,email) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
@@ -3123,7 +3132,6 @@ def register_students_bulk(
             )
             _audit_in_transaction(conn, actor, "ENROLL", "student_enrollments", int(enrollment_cursor.lastrowid))
             admission_numbers.append(admission_no)
-            next_number += 1
         return {"count": len(admission_numbers), "admission_numbers": admission_numbers}
 
 
@@ -3640,12 +3648,10 @@ def export_csv(module_name: str, path: str) -> None:
             return "'" + value
         return value
 
-    with connection() as db, open(path, "w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.writer(file)
-        writer.writerow(labels)
+    from .spreadsheet_files import write_rows
+    with connection() as db:
         rows = db.execute(f"SELECT {','.join(columns)} FROM {spec['table']} ORDER BY id")
-        for row in rows:
-            writer.writerow([spreadsheet_safe(row[column]) for column in columns])
+        write_rows(path, labels, ([spreadsheet_safe(row[column]) for column in columns] for row in rows))
 
 
 def _attendance_roster(conn: sqlite3.Connection, session_id: int, class_id: int, attendance_date: str):

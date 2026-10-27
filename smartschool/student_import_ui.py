@@ -1,4 +1,4 @@
-"""Preview-first dialog for bulk student registration from CSV."""
+"""Preview-first dialog for bulk student registration from CSV/Excel."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class StudentImportDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(wrapped_label(
             "Choose the class placement, academic session, and enrollment date for this file. "
-            "The CSV supplies each student's names and optional contact and identity details."
+            "The spreadsheet supplies each student's name and optional details. Choose a class, session, and date here."
         ))
         form = QFormLayout()
         self.class_section = QComboBox()
@@ -59,17 +59,17 @@ class StudentImportDialog(QDialog):
         layout.addLayout(form)
 
         file_row = QHBoxLayout()
-        self.choose_file_button = QPushButton("Choose student CSV…")
+        self.choose_file_button = QPushButton("Choose student file…")
         self.file_label = QLabel("No file selected")
         self.file_label.setWordWrap(True)
         file_row.addWidget(self.choose_file_button)
         file_row.addWidget(self.file_label, 1)
         layout.addLayout(file_row)
-        self.status = QLabel("Use the CSV template so the column names match.")
+        self.status = QLabel("Choose a CSV or Excel workbook (.xlsx). Full name or first and last names are accepted.")
         layout.addWidget(self.status)
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels([
-            "First Name", "Last Name", "Gender", "Guardian Phone Number", "NIN", "Date of Birth", "Email"
+            "Admission No.", "First Name", "Last Name", "Gender", "Guardian Phone", "NIN", "Date of Birth", "Email"
         ])
         configure_table_headers(self.table)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -106,7 +106,7 @@ class StudentImportDialog(QDialog):
 
     def _choose_file(self):
         path, _selected_filter = QFileDialog.getOpenFileName(
-            self, "Choose student CSV", "", "CSV files (*.csv);;All files (*)"
+            self, "Choose student file", "", "Spreadsheets (*.xlsx *.csv);;Excel workbooks (*.xlsx);;CSV files (*.csv)"
         )
         if not path:
             return
@@ -127,7 +127,7 @@ class StudentImportDialog(QDialog):
         self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(self._rows))
         for row_index, row in enumerate(self._rows):
-            for column, key in enumerate(("first_name", "last_name", "gender", "guardian_phone", "nin", "date_of_birth", "email")):
+            for column, key in enumerate(("admission_no", "first_name", "last_name", "gender", "guardian_phone", "nin", "date_of_birth", "email")):
                 self.table.setItem(row_index, column, QTableWidgetItem(row[key]))
         self.table.setUpdatesEnabled(True)
         self.table.resizeColumnsToContents()
@@ -138,13 +138,13 @@ class StudentImportDialog(QDialog):
 
     def _accept_if_ready(self):
         if not self._rows or self.class_section.currentData() is None or self.session.currentData() is None:
-            QMessageBox.information(self, "Choose import details", "Choose a valid CSV, class, and academic session.")
+            QMessageBox.information(self, "Choose import details", "Choose a valid student spreadsheet, class, and academic session.")
             return
         answer = QMessageBox.question(
             self,
             "Confirm student registrations",
             f"Register {len(self._rows)} student(s) in {self.class_section.currentText()} "
-            f"for {self.session.currentText()}? The app will generate admission IDs. This saves the entire "
+            f"for {self.session.currentText()}? Supplied admission numbers are preserved; missing ones are generated. This saves the entire "
             "file as one transaction; if any record cannot be saved, none will be added.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

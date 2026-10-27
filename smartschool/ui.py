@@ -4,7 +4,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QTableWidget, QTableWidgetItem, QMessageBox,
     QDialog, QFormLayout, QDialogButtonBox, QStackedWidget, QFrame, QDateEdit,
-    QFileDialog, QInputDialog, QProgressBar, QTabWidget, QScrollArea, QCheckBox, QGridLayout
+    QFileDialog, QInputDialog, QProgressBar, QTabWidget, QScrollArea, QCheckBox, QGridLayout,
+    QToolButton, QMenu
 )
 from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
@@ -467,9 +468,9 @@ class ModulePage(QWidget):
         self.import_btn = None
         self.template_btn = None
         if module_name == "Students":
-            self.import_btn = QPushButton("Import students CSV…")
+            self.import_btn = QPushButton("Import students…")
             self.import_btn.clicked.connect(self.import_students_csv)
-            self.template_btn = QPushButton("CSV template")
+            self.template_btn = QPushButton("Student template")
             self.template_btn.clicked.connect(self.export_student_template)
         self.edit_btn = QPushButton("Edit selected")
         if module_name == "Students":
@@ -477,7 +478,7 @@ class ModulePage(QWidget):
         self.edit_btn.setEnabled(False)
         self.edit_btn.clicked.connect(self.edit_record)
         header.addWidget(self.edit_btn)
-        self.export_btn = QPushButton("Export CSV")
+        self.export_btn = QPushButton("Export Excel")
         self.export_btn.clicked.connect(self.export)
         header.addWidget(self.export_btn)
         layout.addLayout(header)
@@ -718,22 +719,22 @@ class ModulePage(QWidget):
 
     def export_student_template(self):
         path, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Save student CSV template", "student_registration_template.csv", "CSV files (*.csv)"
+            self, "Save student template", "student_registration_template.xlsx", "Excel workbook (*.xlsx);;CSV file (*.csv)"
         )
         if not path:
             return
-        if not path.casefold().endswith(".csv"):
-            path += ".csv"
+        if not path.casefold().endswith((".csv", ".xlsx")):
+            path += ".xlsx" if "excel" in _selected_filter.casefold() else ".csv"
         try:
             write_student_template(path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not save template", str(exc))
             return
         self.page_status.setText(f"Student template saved: {path}")
         QMessageBox.information(
             self, "Student template ready",
-            "Fill first_name and last_name for each student. NIN, date_of_birth, email, gender, and guardian_phone are optional. "
-            "Choose the class, session, and enrollment date in the import screen.",
+            "Fill admission_no if you need to preserve an existing ID; leave it blank to generate one. Use full_name or first_name plus last_name. "
+            "Other details are optional. Choose the destination class, session, and enrollment date in the import screen.",
         )
 
     def _registration_options_loaded(self, request_id, options, error):
@@ -864,9 +865,13 @@ class ModulePage(QWidget):
         self.refresh()
 
     def export(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", f"{self.module_name.lower()}.csv", "CSV files (*.csv)")
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export spreadsheet", f"{self.module_name.lower()}.xlsx", "Excel workbook (*.xlsx);;CSV file (*.csv)"
+        )
         if not path:
             return
+        if not path.casefold().endswith((".csv", ".xlsx")):
+            path += ".xlsx" if "excel" in _selected_filter.casefold() else ".csv"
         self._start_export(path)
 
     def _start_export(self, path):
@@ -882,11 +887,11 @@ class ModulePage(QWidget):
     def _export_finished(self, export_id, _result, error):
         self._export_workers.pop(export_id, None)
         self.export_btn.setEnabled(True)
-        self.export_btn.setText("Export CSV")
+        self.export_btn.setText("Export Excel")
         if error is not None:
             QMessageBox.warning(self, "Export failed", str(error))
         else:
-            QMessageBox.information(self, "Export complete", "CSV export finished.")
+            QMessageBox.information(self, "Export complete", "Spreadsheet export finished.")
 
 def _load_dashboard_payload(username):
     from . import dashboard_data
@@ -1583,6 +1588,7 @@ class MainWindow(QMainWindow):
         self.nav_filter.textChanged.connect(self._filter_nav)
         nav.addWidget(self.nav_filter)
         self._nav_buttons = {}
+        self._nav_search_origin_tab = None
         self.stack = QStackedWidget()
         self.pages = {}
         self._page_factories = {}
@@ -1627,15 +1633,6 @@ class MainWindow(QMainWindow):
             nav_tabs.addTab(scroll, tab_name)
         nav.addWidget(nav_tabs, 1)
         nav.addStretch()
-        who = QLabel(f"Signed in: {self.user['username']}\nRole: {self.user['role']}")
-        who.setWordWrap(True)
-        who.setContentsMargins(12, 10, 12, 4)
-        nav.addWidget(who)
-        password_button = QPushButton("Change my password")
-        password_button.setObjectName("nav")
-        password_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        password_button.clicked.connect(self.change_password)
-        nav.addWidget(password_button)
         root_layout.addWidget(sidebar)
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -1649,6 +1646,15 @@ class MainWindow(QMainWindow):
         self.page_title.setObjectName("pageTitle")
         top.addWidget(self.page_title)
         top.addStretch()
+        self.account_button = QToolButton()
+        self.account_button.setText(f"{self.user['username']} · {self.user['role'].title()} ▾")
+        self.account_button.setToolTip("Account options")
+        self.account_menu = QMenu(self.account_button)
+        self.change_password_action = self.account_menu.addAction("Change my password")
+        self.change_password_action.triggered.connect(self.change_password)
+        self.account_button.setMenu(self.account_menu)
+        self.account_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        top.addWidget(self.account_button)
         refresh_button = QPushButton("Refresh")
         refresh_button.setToolTip("Reload the current page (F5)")
         refresh_button.clicked.connect(self.refresh_current_page)
@@ -1686,8 +1692,24 @@ class MainWindow(QMainWindow):
 
     def _filter_nav(self, text):
         needle = text.strip().casefold()
+        matching_pages = []
         for name, button in self._nav_buttons.items():
-            button.setVisible(not needle or needle in name.casefold())
+            visible = not needle or needle in name.casefold()
+            button.setVisible(visible)
+            if visible and needle:
+                matching_pages.append(name)
+        if not needle:
+            if self._nav_search_origin_tab is not None:
+                self._nav_tabs.setCurrentIndex(self._nav_search_origin_tab)
+                self._nav_search_origin_tab = None
+            return
+        if self._nav_search_origin_tab is None:
+            self._nav_search_origin_tab = self._nav_tabs.currentIndex()
+        current_tab = self._nav_tabs.currentIndex()
+        if matching_pages and not any(
+            self._nav_tab_for_page.get(name) == current_tab for name in matching_pages
+        ):
+            self._nav_tabs.setCurrentIndex(self._nav_tab_for_page[matching_pages[0]])
 
     def _set_active_nav(self, name):
         for page_name, button in self._nav_buttons.items():

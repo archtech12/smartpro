@@ -13,6 +13,8 @@ From the repository root in PowerShell:
 
     powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 
+Windows users can run the same build by double-clicking `build.bat` from the repository root.
+
 The script creates `.venv-build`, installs `requirements-build.txt`, **runs the full test
 suite (the build stops if anything fails)**, runs PyInstaller, then Inno Setup.
 Result: `installer\SmartSchoolManager-Setup-<version>.exe`.

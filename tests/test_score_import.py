@@ -36,6 +36,7 @@ def test_score_template_uses_admission_number_and_current_roster(tmp_path):
     with path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["admission_no"] == "A-001"
+    assert rows[0]["student_name"] == "Amina One"
     assert rows[0]["SUBJECT_COURSEWORK"] == ""
     assert rows[1]["SUBJECT_END_TERM_EXAM"] == ""
 
@@ -46,7 +47,7 @@ def test_score_template_uses_short_subject_component_codes(tmp_path):
         path, _students(), [{"id": 4, "component_name": "CA Score", "max_score": "20"}], "MTH"
     )
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        assert next(csv.reader(handle)) == ["admission_no", "first_name", "last_name", "MTH_CA"]
+        assert next(csv.reader(handle)) == ["admission_no", "student_name", "MTH_CA"]
 
 
 def test_score_import_uses_selected_subject_code_in_short_headers(tmp_path):
@@ -104,4 +105,22 @@ def test_score_template_neutralizes_spreadsheet_formulas(tmp_path):
     with path.open(newline="", encoding="utf-8-sig") as handle:
         row = next(csv.DictReader(handle))
     assert row["admission_no"] == "'=1+1"
-    assert row["first_name"] == "'@SUM(A1:A2)"
+    assert row["student_name"] == "'@SUM(A1:A2) School"
+
+
+def test_excel_score_template_uses_id_name_ca_exam_headers_and_imports_scores(tmp_path):
+    from smartschool.spreadsheet_files import read_rows, write_rows
+
+    path = tmp_path / "scores.xlsx"
+    components = [
+        {"id": 4, "component_name": "CA Score", "max_score": "40"},
+        {"id": 9, "component_name": "Exam Score", "max_score": "60"},
+    ]
+    write_score_template(path, _students(), components, "MTH")
+    headers, rows = read_rows(path)
+    assert headers == ["admission_no", "student_name", "MTH_CA", "MTH_EXAM"]
+    assert rows[0]["admission_no"] == "A-001"
+    assert rows[0]["student_name"] == "Amina One"
+    write_rows(path, headers, [["A-001", "Amina One", "32", "55"]])
+    result = preview_score_import(path, _students(), components, "MTH")
+    assert result["updates"] == {21: {4: "32", 9: "55"}}

@@ -11,7 +11,8 @@ Write-Host "==> Creating build environment"
 python -m venv .venv-build
 $py = ".\.venv-build\Scripts\python.exe"
 & $py -m pip install --upgrade pip
-& $py -m pip install -r requirements-build.txt pytest
+& $py -m pip install -r requirements-build.txt -r requirements-dev.txt
+if ($LASTEXITCODE -ne 0) { throw "Build and test dependencies could not be installed. Check package-network access, then retry." }
 
 Write-Host "==> Running tests (the build stops if any fail)"
 & $py -m pytest -q

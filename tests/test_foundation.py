@@ -323,6 +323,14 @@ def test_csv_export_neutralizes_spreadsheet_formulas(isolated_db, tmp_path):
     assert row["last_name"] == "'@SUM(A1:A2)"
     assert row["guardian_phone"] == "'+123456"
 
+    from smartschool.spreadsheet_files import read_rows
+    excel_path = tmp_path / "students.xlsx"
+    db.export_csv("Students", str(excel_path))
+    headers, excel_rows = read_rows(excel_path)
+    assert headers[0] == "admission_no"
+    assert excel_rows[0]["admission_no"] == "A-1"
+    assert excel_rows[0]["first_name"].startswith("'=")
+
 
 def test_teacher_link_migration_preserves_accounts_unlinked_and_guards_roles(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "APP_DIR", tmp_path)

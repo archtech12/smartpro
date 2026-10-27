@@ -109,6 +109,23 @@ def test_bulk_student_registration_assigns_ids_and_enrollments_atomically(enroll
     assert {row["class_id"] for row in placements} == {ids["class_a"]}
 
 
+def test_bulk_student_registration_preserves_supplied_ids_and_generates_missing_ids(enrollment_db):
+    ids = enrollment_db
+    result = db.register_students_bulk(
+        [
+            {"admission_no": "RECOVERED-42", "first_name": "Musa", "last_name": "Bello"},
+            {"first_name": "Sara", "last_name": "Khan"},
+        ],
+        ids["class_a"], ids["session"], "2026-09-10", "admin",
+    )
+    assert result["admission_numbers"] == ["RECOVERED-42", "ADM-2026-00002"]
+    with pytest.raises(ValueError, match="already in use"):
+        db.register_students_bulk(
+            [{"admission_no": "RECOVERED-42", "first_name": "A", "last_name": "B"}],
+            ids["class_a"], ids["session"], "2026-09-10", "admin",
+        )
+
+
 def test_bulk_student_registration_rolls_back_whole_file_on_audit_failure(enrollment_db, monkeypatch):
     ids = enrollment_db
     original_audit = db._audit_in_transaction

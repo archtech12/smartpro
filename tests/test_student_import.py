@@ -16,7 +16,7 @@ def test_student_template_is_blank_and_has_expected_headers(tmp_path):
     path = tmp_path / "students.csv"
     write_student_template(path)
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        assert next(csv.reader(handle)) == ["first_name", "last_name", "gender", "guardian_phone", "nin", "date_of_birth", "email"]
+        assert next(csv.reader(handle)) == ["admission_no", "first_name", "last_name", "gender", "guardian_phone", "nin", "date_of_birth", "email"]
 
 
 def test_student_import_accepts_optional_fields_and_skips_blank_lines(tmp_path):
@@ -29,8 +29,8 @@ def test_student_import_accepts_optional_fields_and_skips_blank_lines(tmp_path):
     assert preview_student_import(path) == {
         "row_count": 2,
         "rows": [
-            {"first_name": "Amina", "last_name": "Okafor", "gender": "Female", "guardian_phone": "555-0101", "nin": "", "date_of_birth": "", "email": ""},
-            {"first_name": "Musa", "last_name": "Bello", "gender": "", "guardian_phone": "", "nin": "", "date_of_birth": "", "email": ""},
+            {"admission_no": "", "first_name": "Amina", "last_name": "Okafor", "gender": "Female", "guardian_phone": "555-0101", "nin": "", "date_of_birth": "", "email": ""},
+            {"admission_no": "", "first_name": "Musa", "last_name": "Bello", "gender": "", "guardian_phone": "", "nin": "", "date_of_birth": "", "email": ""},
         ],
     }
 
@@ -41,14 +41,14 @@ def test_student_import_accepts_optional_nin_birth_date_and_email(tmp_path):
         {"first_name": "Amina", "last_name": "Okafor", "nin": "NIN-001", "date_of_birth": "2012-03-04", "email": "amina@example.org"},
     ])
     assert preview_student_import(path)["rows"][0] == {
-        "first_name": "Amina", "last_name": "Okafor", "gender": "", "guardian_phone": "",
+        "admission_no": "", "first_name": "Amina", "last_name": "Okafor", "gender": "", "guardian_phone": "",
         "nin": "NIN-001", "date_of_birth": "2012-03-04", "email": "amina@example.org",
     }
 
 
 @pytest.mark.parametrize(("headers", "rows", "message"), [
-    (["first_name", "gender"], [{"first_name": "Amina", "gender": "Female"}], "missing required"),
-    (["first_name", "last_name", "unexpected"], [{"first_name": "Amina", "last_name": "Okafor", "unexpected": "x"}], "unexpected columns"),
+    (["first_name", "gender"], [{"first_name": "Amina", "gender": "Female"}], "first_name and last_name"),
+    (["first_name", "last_name", "unexpected"], [{"first_name": "Amina", "last_name": "Okafor", "unexpected": "x"}], "not recognized"),
     (["first_name", "last_name", "FIRST_NAME"], [{"first_name": "Amina", "last_name": "Okafor", "FIRST_NAME": "A"}], "duplicate column"),
     (["first_name", "last_name"], [{"first_name": "", "last_name": "Okafor"}], "first name is required"),
     (["first_name", "last_name"], [{"first_name": "A" * 101, "last_name": "Okafor"}], "at most 100 characters"),
@@ -60,3 +60,29 @@ def test_student_import_rejects_invalid_files_without_partial_preview(tmp_path, 
     _write_csv(path, headers, rows)
     with pytest.raises(ValueError, match=message):
         preview_student_import(path)
+
+
+def test_student_import_splits_full_name_and_preserves_supplied_admission_number(tmp_path):
+    path = tmp_path / "students.csv"
+    _write_csv(path, ["adm_no", "student name", "sex", "phone"], [
+        {"adm_no": "OLD-001", "student name": "Amina Mary Okafor", "sex": "Female", "phone": "555-0101"},
+    ])
+    row = preview_student_import(path)["rows"][0]
+    assert row["admission_no"] == "OLD-001"
+    assert row["first_name"] == "Amina"
+    assert row["last_name"] == "Mary Okafor"
+    assert row["gender"] == "Female"
+
+
+def test_student_import_excel_workbook_supports_full_name_and_optional_id(tmp_path):
+    from smartschool.spreadsheet_files import write_rows
+
+    path = tmp_path / "students.xlsx"
+    write_rows(path, ["student_id", "full_name", "gender", "email"], [
+        ["KEEP-001", "Amina Okafor", "Female", "amina@example.org"],
+        [None, "Musa Bello", None, None],
+    ])
+    rows = preview_student_import(path)["rows"]
+    assert rows[0]["admission_no"] == "KEEP-001"
+    assert (rows[0]["first_name"], rows[0]["last_name"]) == ("Amina", "Okafor")
+    assert rows[1]["admission_no"] == ""

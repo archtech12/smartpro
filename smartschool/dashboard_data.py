@@ -20,7 +20,7 @@ SETUP_STEPS = (
     ("class_subjects", "Class subjects", "Say which subjects each class takes and who teaches them.", "Class Subjects", True),
     ("bands", "Grade bands", "Define grade boundaries for each stage in the current session.", "Grade Bands", True),
     ("assessment", "Assessment setup", "Set the CA and exam components and their maximum scores.", "Assessment Setup", True),
-    ("students", "Students", "Register students or import them from a CSV file.", "Students", True),
+    ("students", "Students", "Register students or import a CSV/Excel class roster.", "Students", True),
     ("enrollments", "Enrollments", "Place students in classes for the current session.", "Enrollments", True),
     ("teachers", "Teacher accounts", "Optional: give teachers their own sign-in for scores and attendance.", "User Accounts", False),
     ("fees", "Fees", "Optional: create fee types and set amounts per class and term.", "Fee Setup", False),

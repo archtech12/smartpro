@@ -1003,7 +1003,7 @@ def test_report_card_with_impossibly_many_subjects_is_refused_not_split(grade_en
     from smartschool.assessment_ui import GradeEntryPage
 
     ids = grade_entry_db
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     _class_with_many_subjects(ids, 3)
     data = db.load_class_report_cards_data(ids["session"], ids["class"], ids["term"])
     template = data["report_cards"][0]["subjects"][0]
@@ -1011,6 +1011,7 @@ def test_report_card_with_impossibly_many_subjects_is_refused_not_split(grade_en
         card["subjects"] = [dict(template, subject_code=f"Z{n}", subject_name=f"Subject {n}") for n in range(400)]
     with pytest.raises(ValueError, match="too many subjects to fit on one page"):
         GradeEntryPage._render_class_report_cards_pdf(data, str(ids["tmp"] / "too-many.pdf"))
+    assert app is not None
 
 
 def test_report_card_html_prints_term_closing_and_next_term_dates_only_when_set(grade_entry_db):

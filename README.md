@@ -34,6 +34,9 @@ If PowerShell blocks activation, use:
 .\.venv\Scripts\python.exe main.py
 ```
 
+After setting up the project, Windows users can also double-click `app.bat` to launch it.
+The launcher uses the repository's `.venv` and the normal per-user school-data folder.
+
 ## First run
 The app asks you to create the first administrator account. There is no hard-coded default password.
 
@@ -132,7 +135,7 @@ In **Settings > School Profile**, select **Primary**, **Secondary**, or **Primar
 
 ## Building the Windows installer
 
-`packaging\build_windows.ps1` builds `installer\SmartSchoolManager-Setup-<version>.exe`
+Run `build.bat` (or `packaging\build_windows.ps1`) to build `installer\SmartSchoolManager-Setup-<version>.exe`
 (PyInstaller + Inno Setup). It runs the tests first and never touches school data. See
 [docs/PACKAGING.md](docs/PACKAGING.md) for requirements, releasing, upgrades and SmartScreen.
 

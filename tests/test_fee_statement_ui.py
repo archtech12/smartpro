@@ -16,10 +16,14 @@ from test_school_profile import PNG_PIXEL  # noqa: E402
 
 from smartschool import database as db  # noqa: E402
 
+_APP = None
+
 
 def _app():
+    global _APP
     from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
+    _APP = QApplication.instance() or QApplication([])
+    return _APP
 
 
 def _wait(condition, seconds=5):
@@ -83,6 +87,7 @@ def test_statement_dialog_reports_overpayment_without_changing_the_ledger(school
 
 def _fee_setup_page():
     from smartschool.fees_ui import FeeSetupPage
+    _app()
     page = FeeSetupPage("admin", "admin")
     assert _wait(lambda: page.status.text().startswith("Loaded"))
     return page
