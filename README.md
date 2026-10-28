@@ -37,6 +37,8 @@ If PowerShell blocks activation, use:
 After setting up the project, Windows users can also double-click `app.bat` to launch it.
 The launcher uses the repository's `.venv` and the normal per-user school-data folder.
 
+For setup, registration, grades, reports, attendance, fees, backups, and the import workflow, see [HOW_TO_USE_APP.md](HOW_TO_USE_APP.md).
+
 ## First run
 The app asks you to create the first administrator account. There is no hard-coded default password.
 
@@ -47,7 +49,7 @@ This is an **early offline-first rebuild**, not a completed enterprise release. 
 - Dashboard
 - Basic CRUD screens for students, teachers, classes, and subjects
 - Guided student registration: enter required names, optional contact details, choose a class/section and academic session, and receive a generated admission ID; the student and enrollment save together
-- Preview-first student CSV registration: validate a roster, select one class/session/date, generate admission IDs, and save all student/enrollment records atomically
+- Preview-first student Excel/CSV registration: validate a roster, select one class/session/date, preserve supplied admission IDs or generate missing IDs, and save all student/enrollment records atomically
 - Search and CSV export for the currently selected module
 - Paginated record and enrollment tables, background search/export, and searchable student lookup
 - Background database initialization and migration with a visible startup progress state
@@ -73,7 +75,7 @@ This is an **early offline-first rebuild**, not a completed enterprise release. 
 - Configurable grade thresholds and remarks by academic session and stage, with no prefilled or assumed grading scale
 - Term-scoped assessment component setup with decimal maximum points
 - Administrator-only draft grade entry, complete-result approval/locking, and reasoned corrections with preserved score history
-- Grade entry CSV template export and validated draft score import matched by admission number
+- Grade entry Excel/CSV template export and validated draft score import matched by admission number
 - Individual report card PDF uses the school-style layout: component scores (including CA and Exam), subject totals/grades/positions/remarks, overall average, selected class position or average grade, skill ratings, attendance, optional teacher/principal remarks, profile, photo, grade key, term dates and signatories; each student gets one A4 page, including classes with 20+ subjects
 - Class report-card PDF export with one page per enrolled student, each containing that student's approved subject results
 - Optional student PNG/JPEG photos on report cards; school identity, logo, head and class-teacher signatory details are configured in School Profile
@@ -85,11 +87,12 @@ This is an **early offline-first rebuild**, not a completed enterprise release. 
 - Session, class, and date-scoped attendance with explicit Present/Absent marks and reasoned correction history; unmarked is not treated as absent
 - Attendance date-range summaries that report enrolled, present, absent, and unmarked counts separately
 - Session-scoped timetable slots with editable weekdays and 24-hour start/end times; class, assigned-teacher, and named-location overlaps are blocked without imposing period lengths or a school-week pattern
+- Administrator-started FastAPI CBT server for school-network health checks only; exam authentication, delivery, and answer submission are not implemented yet
 - Landscape PDF export of the selected session timetable with optional school profile and logo
 - Admin-managed fee schedules, immutable draft invoices, issuance, partial receipts, derived balances, reasoned reversals, receipt PDFs, date-scoped reconciliation CSV, and read-only comparison with a generic statement CSV
 - Isolated foundation, calendar, enrollment, class-stage, class-subject, assessment, grade-band, attendance, and timetable tests in `tests/`
 
-Still remaining: define a school-authorized reopen and reapproval lifecycle, assessment weighting, absence/exemption policy, attendance late/excused statuses, school review of local fee collection and statement-comparison practices, CBT, email/WhatsApp queues, licensing, encrypted database, general student/record import validation, native Windows visual review, and installer packaging. Legacy class values are never mapped automatically; administrator-confirmed mapping is available. Review `docs/` for the audit, architecture, feature matrix, security model, and roadmap. Review the mapping, class-subject, assessment setup, grade-entry, and report-card flows on synthetic records before real school data use. The app can open a restored copy through a process-scoped data-directory override; replacing the usual active database in place remains unsupported.
+Still remaining: define a school-authorized reopen and reapproval lifecycle, assessment weighting, absence/exemption policy, attendance late/excused statuses, school review of fee collection and statement reconciliation, fee workflow decisions (cross-session student lookup, annual schedules, term-change invoice generation, statistics, and currency display), CBT exam authoring/candidate access/answer handling, optional network delivery for the offline Communication Center, licensing, general record imports, native Windows visual review, operational restore review, and installer testing. Legacy class values are never mapped automatically; administrator-confirmed mapping is available. Review `docs/` for the audit, architecture, feature matrix, security model, and roadmap. Review the mapping, class-subject, assessment setup, grade-entry, and report-card flows on synthetic records before real school data use. The app can open a restored copy through a process-scoped data-directory override; replacing the usual active database in place remains unsupported.
 
 ### Setting up teacher grade entry
 
@@ -97,19 +100,19 @@ First add the staff member under **Main > Teachers** and make sure their status 
 
 To let that teacher use their assignments, open **Settings > User Accounts** and create a teacher login linked to the same active staff record, or link an existing teacher login. The teacher signs in with that account and sees **Grade Entry** and **Attendance** only. They can enter and save draft scores for assigned class-subjects and take attendance for those classes in the selected session. Changing a saved attendance mark requires a reason and is retained in history; administrators retain result approval and correction access. Existing teacher logins are not linked automatically.
 
-### Entering scores with a CSV
+### Entering scores with Excel or CSV
 
 Prepare the class before entering results: each student must have an enrollment in the academic session and class, and the subject must be assigned to that class in **Settings > Class Subjects**. Grade Entry uses **Session**, **Term**, **Class**, and **Subject** selectors. On the first administrator load of a class-subject and term with no components, the app creates **CA Score (40)** and **Exam Score (60)** starter columns automatically. The school can edit the component names and maximum points in **Settings > Assessment Setup** before saving scores; additional components can be added there. Set grading bands for the session and school stage in **Settings > Grade Bands**.
 
 Open **Main > Grade Entry**, then select session, term, class, and subject. The app automatically loads students whose active enrollment overlaps that term; you do not need to load each student individually. A newly registered student is enrolled in the class/session selected on the registration form. For an existing student moving classes or sessions, use **Main > Enrollments** so the previous placement stays in history. If a subject or student is missing, check its class-subject assignment and the student's enrollment.
 
-Enter scores directly in the student rows, or choose **Export CSV template** to get the loaded roster and component columns. Fill the score columns and choose **Import Scores**. Admission number identifies each student; the name columns are for reference. The app validates the entire file against the selected roster and each component's maximum before showing a preview. As you type or review imported values, the table recalculates total, maximum points, percentage, and subject grade using the school's configured grade bands. These values are a preview until you click **Save All Grades**; saved scores remain drafts until an administrator approves them. Blank CSV score cells leave existing table values unchanged. Grade labels should not be entered in the CSV.
+Enter scores directly in the student rows, or choose **More > Export Excel template** to get the loaded roster and component columns. Excel (`.xlsx`) and CSV imports are supported. Fill the score columns and choose **Import Scores**. Admission number identifies each student; the name columns are for reference. The app validates the entire file against the selected roster and each component's maximum before showing a preview. As you type or review imported values, the table recalculates total, maximum points, percentage, and subject grade using the school's configured grade bands. These values are a preview until you click **Save All Grades**; saved scores remain drafts until an administrator approves them. Blank score cells leave existing table values unchanged. Grade labels should not be entered in the file.
 
 ### Registering a student
 
 Open **Students** from the Main navigation and choose **Register student**. Enter the student's first and last name, add available contact details, and select the class/section and academic session. The app generates the admission ID when saving and creates the student's enrollment in the selected class at the same time. Add the class and academic session in Settings first if either list is empty. To move an existing student to another class, use **Enrollments** so the previous placement remains in the history.
 
-For a roster, choose **CSV template**, fill `first_name` and `last_name` for each student, and optionally fill `gender` and `guardian_phone`. Choose **Import students CSV…**, select the class, session, and enrollment date, then review the validated rows before confirming. Admission IDs are generated automatically. The whole import succeeds together or rolls back together if a row cannot be registered.
+For a roster, choose **Excel template**, fill `first_name` and `last_name` for each student, and optionally fill `gender` and `guardian_phone`. An existing `admission_no` is preserved; leave it blank to generate an ID. Choose **Import students (Excel/CSV)…**, select the class, session, and enrollment date, then review the validated rows before confirming. Excel (`.xlsx`) and CSV are supported. The whole import succeeds together or rolls back together if a row cannot be registered.
 
 To retain a student record while removing the student from active workflows, select the student and choose **Archive student**. The register displays Active or Archived status and can filter to all, active, or archived students. Archived students and their enrollment history remain stored; restore the record from the same screen when needed. Both actions require an administrator and are audited.
 

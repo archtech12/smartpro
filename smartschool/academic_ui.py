@@ -986,7 +986,8 @@ class GradeBandSetupPage(QWidget):
         layout.addWidget(title)
         layout.addWidget(wrapped_label(
             "Configure each school's grading scale separately for Primary and Secondary. "
-            "No grades or remarks are prefilled. A threshold starts a band; the last band extends to 100."
+            "Use the report-sample A–F scale as an editable starting point, or enter your school's own scale. "
+            "A threshold starts a band; the last band extends to 100. Confirm the scale with your school."
         ))
         selectors = QFormLayout()
         self.session = QComboBox()
@@ -1000,10 +1001,11 @@ class GradeBandSetupPage(QWidget):
         layout.addLayout(selectors)
         controls = QHBoxLayout()
         controls.addStretch()
+        self.sample_button = QPushButton("Use sample A–F scale")
         self.add_button = QPushButton("Add threshold")
         self.edit_button = QPushButton("Edit selected")
         self.delete_button = QPushButton("Delete selected")
-        for button in (self.add_button, self.edit_button, self.delete_button):
+        for button in (self.sample_button, self.add_button, self.edit_button, self.delete_button):
             button.setEnabled(self.is_admin)
             controls.addWidget(button)
         layout.addLayout(controls)
@@ -1019,6 +1021,7 @@ class GradeBandSetupPage(QWidget):
         self.status = QLabel()
         layout.addWidget(self.status)
         self.add_button.clicked.connect(self.add_band)
+        self.sample_button.clicked.connect(self.apply_sample_scale)
         self.edit_button.clicked.connect(self.edit_band)
         self.delete_button.clicked.connect(self.delete_band)
         self.table.itemSelectionChanged.connect(self._update_actions)
@@ -1032,6 +1035,7 @@ class GradeBandSetupPage(QWidget):
         ready = self.is_admin and not self._loading and not self._writing
         has_scope = self.session.currentData() is not None and self.stage.currentData() is not None
         selected = self._selected() is not None
+        self.sample_button.setEnabled(ready and has_scope and not self._rows)
         self.add_button.setEnabled(ready and has_scope)
         self.edit_button.setEnabled(ready and has_scope and selected)
         self.delete_button.setEnabled(ready and has_scope and selected)
@@ -1094,9 +1098,9 @@ class GradeBandSetupPage(QWidget):
             for column, value in enumerate((band["id"], band["threshold"], band["grade_label"], band["remark"])):
                 self.table.setItem(row_index, column, QTableWidgetItem(str(value)))
         if not self._rows:
-            self.status.setText("No scale configured for this session and stage. Add the first band at 0%.")
+            self.status.setText("No scale yet. Use the sample A–F scale or add your first grade at 0%.")
         else:
-            self.status.setText(f"{len(self._rows)} threshold(s); no school-wide defaults applied")
+            self.status.setText(f"{len(self._rows)} editable threshold(s) for this session and stage")
         self._update_actions()
 
     def add_band(self):
@@ -1106,6 +1110,26 @@ class GradeBandSetupPage(QWidget):
         dialog = GradeBandDialog(parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._save(dialog.values(), None)
+
+    def apply_sample_scale(self):
+        session_id = self.session.currentData()
+        if session_id is None or self._rows:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Apply sample grade scale",
+            "Add editable thresholds: A from 75%, B from 65%, C from 50%, D from 40%, and F from 0%? "
+            "This is based on the supplied report sample; confirm it matches your school's policy.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_write(
+                lambda: db.apply_sample_assessment_grade_scale(
+                    int(session_id), self.stage.currentData(), self.username
+                ),
+                "Could not apply sample grade scale",
+            )
 
     def edit_band(self):
         band = self._selected()

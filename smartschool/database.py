@@ -40,7 +40,7 @@ MODULES = {
     "Students": {"table": "students", "fields": [("admission_no", "Admission Number"), ("first_name", "First Name"), ("last_name", "Last Name"), ("gender", "Gender"), ("class_name", "Class"), ("guardian_phone", "Guardian Phone Number"), ("nin", "NIN"), ("date_of_birth", "Date of Birth"), ("email", "Email")]},
     "Teachers": {"table": "teachers", "fields": [("staff_no", "Staff Number"), ("first_name", "First Name"), ("last_name", "Last Name"), ("phone", "Phone Number"), ("email", "Email"), ("status", "Staff Status")]},
     "Classes": {"table": "classes", "fields": [("class_name", "Class Name"), ("section", "Section"), ("class_teacher", "Class Teacher")]},
-    "Subjects": {"table": "subjects", "fields": [("subject_code", "Subject Code"), ("subject_name", "Subject Name"), ("level", "School Level")]},
+    "Subjects": {"table": "subjects", "fields": [("subject_code", "Subject Code"), ("subject_name", "Subject Name"), ("level", "Subject Level (optional)")]},
 }
 
 EDUCATIONAL_STAGES = {"primary": "Primary", "secondary": "Secondary"}
@@ -2145,6 +2145,43 @@ def save_assessment_grade_band(
             action = "UPDATE"
         _audit_in_transaction(conn, actor, action, "assessment_grade_bands", band_id)
         return band_id
+
+
+def apply_sample_assessment_grade_scale(
+    academic_session_id: int, educational_stage: str, actor: str
+) -> int:
+    """Apply the editable A–F starter thresholds shown in the supplied report sample."""
+    if educational_stage not in EDUCATIONAL_STAGES:
+        raise ValueError("Select Primary or Secondary.")
+    starter = (("0", "F"), ("40", "D"), ("50", "C"), ("65", "B"), ("75", "A"))
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = _require_admin(conn, actor)
+        if not conn.execute(
+            "SELECT 1 FROM academic_sessions WHERE id=?", (academic_session_id,)
+        ).fetchone():
+            raise ValueError("Select an existing academic session.")
+        if conn.execute(
+            "SELECT 1 FROM assessment_grade_bands WHERE academic_session_id=? AND educational_stage=? LIMIT 1",
+            (academic_session_id, educational_stage),
+        ).fetchone():
+            raise ValueError("This session and stage already have a grade scale; edit it instead.")
+        if conn.execute(
+            "SELECT 1 FROM assessment_policy_snapshots WHERE academic_session_id=? AND educational_stage=? LIMIT 1",
+            (academic_session_id, educational_stage),
+        ).fetchone():
+            raise ValueError("This grade scale is locked because saved scores use its policy snapshot.")
+        ids = []
+        for threshold, grade in starter:
+            cursor = conn.execute(
+                "INSERT INTO assessment_grade_bands "
+                "(academic_session_id,educational_stage,threshold,grade_label,remark) VALUES(?,?,?,?,?)",
+                (academic_session_id, educational_stage, threshold, grade, ""),
+            )
+            band_id = int(cursor.lastrowid)
+            ids.append(band_id)
+            _audit_in_transaction(conn, actor, "CREATE", "assessment_grade_bands", band_id)
+        return len(ids)
 
 
 def delete_assessment_grade_band(band_id: int, actor: str) -> None:

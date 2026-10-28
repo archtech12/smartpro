@@ -34,7 +34,7 @@ COLORS = {
     "warn": "#b54708",
     "warn_soft": "#fff4e5",
     "disabled_bg": "#eef1f5",
-    "disabled_text": "#98a2b3",
+    "disabled_text": "#667085",
     "row_alt": "#f7f9fc",
     "selection": "#d6e4ff",
 }
@@ -128,6 +128,7 @@ QHeaderView::section {{
     background: {c['surface_alt']}; color: {c['navy']}; padding: 8px; border: 0;
     border-bottom: 2px solid {c['border']}; font-weight: 600;
 }}
+QHeaderView {{ background: {c['surface_alt']}; border: 0; }}
 QTableCornerButton::section {{ background: {c['surface_alt']}; border: 0; }}
 
 /* ---------- containers ---------- */

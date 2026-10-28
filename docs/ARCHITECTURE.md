@@ -41,6 +41,8 @@ Schema version 22 adds optional student NIN, date of birth, and email fields wit
 
 `theme.py` is a Qt-free design-token module that builds one application stylesheet; `ui_polish.py` installs it app-wide and tidies tables on first show. Dashboard and setup-guide data come from the read-only `dashboard_data.py` so the UI stays thin. `version.py` is the single version source for the installer build in `packaging/`. The installer never writes to `%LOCALAPPDATA%\SmartSchoolManagerRebuild`.
 
+The optional CBT LAN host is isolated in `smartschool/cbt_server.py`; Uvicorn runs in a daemon thread so starting it does not block Qt. Its first slice exposes only `/health` and does not connect to SQLite. Add exam use cases and access controls before adding any school-data routes.
+
 ## Compatibility
 
 Preserve existing table data with additive migrations unless removal is explicitly requested. Any table rebuild or destructive removal requires a documented migration plan, verified pre-upgrade backup, recovery path, and clear upgrade path. Keep the original installation and its database entirely separate.

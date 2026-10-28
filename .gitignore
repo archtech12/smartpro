@@ -36,3 +36,7 @@ htmlcov/
 /installer/
 /.venv-build/
 *.spec.bak
+
+# User-provided report and generated student import workbooks (personal data)
+/Report_Class_JSS 1.pdf
+/outputs/jss1-report-import-2026-10-27/

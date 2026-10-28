@@ -7,7 +7,7 @@
 - This is a new, offline-first desktop rebuild built with Python, PyQt6, and SQLite.
 - Historical desktop reference repository: <https://github.com/archtech12/SmartSchool.git>. Use it only to understand old workflows/UI when needed; do not copy its whole tree or inherit its behavior without checking it against the user's screenshots and the rebuild's current requirements.
 - Destination repository for the new version: <https://github.com/archtech12/smartpro.git>. New development and intentional commits belong there, not in the historical repository.
-- Work only in this repository. Do not inspect or modify the recovered `SmartSchool-main` tree, the installed application, or any original school-data database unless the user explicitly changes that instruction.
+- Work only in this rebuild repository. The user has allowed read-only inspection of the recovered `SmartSchool-main` desktop source for workflow ideas when specifically useful; never modify it, copy its whole project tree, or use its database. Do not access the installed application or any original school-data database.
 - Do not delete redundant project files or databases without first identifying each exact target and confirming it is inside this repository.
 - Do not add cloud synchronization, assumed currency, fee proration, or encryption changes unless the user requests them and the design is reviewed.
 - Treat user-provided PDFs and screenshots as visual/workflow references. Do not treat their screenshots as proof that every old behavior is correct.
@@ -18,7 +18,7 @@
 - Do not include local virtual environments, Python caches, pytest temp directories, runtime logs, school databases, backups, secrets, build output, or duplicate recovered project trees in commits. Keep generated/local artifacts ignored.
 - Remove only clearly identified redundant or generated files that are inside the active `smartpro` checkout. Do not delete source, documentation, test data needed by the project, user files, or databases just to make a commit smaller. If a folder's purpose is unclear, inspect references and leave it until resolved.
 - Keep the old `SmartSchool` repository read-only. Never commit rebuild changes there.
-- The current working folder supplied for this task has no `.git` directory at its root or parent, so it is not currently a Git checkout. Do not initialize a repository or push until the actual `smartpro` checkout is available and confirmed.
+- This folder is the `smartpro` Git checkout. Confirm the active branch and remote before every push; current observed branch is `overall-average-results`, with `origin` at `https://github.com/archtech12/smartpro.git`. Do not push to the historical repository.
 
 ## Product goals
 
@@ -31,12 +31,13 @@
 
 - The familiar workflow is: choose **Session**, **Term**, **Class**, and **Subject**; the enrolled class roster appears; enter component scores directly in the rows; calculated columns update; save all grades.
 - On the first administrator load of a class-subject/term with no assessment components, the current implementation creates **CA Score (40 points)** and **Exam Score (60 points)** automatically. These are starter defaults from the user's reference workflow. The school can edit component names and maxima in **Assessment Setup** before any score is saved. Do not add a setup dialog or extra setup click to the normal grade-entry path.
-- Grade-entry headers show the configured component maxima and the calculated **Total**, **Max Points**, **Percent**, and **Grade**. Keep exported spreadsheet headers short and stable.
+- Grade-entry headers show the configured component maxima and the visible calculated **Total** and **Grade**. Max Points and Percent remain available internally but are hidden from the entry grid to preserve space. Keep exported spreadsheet headers short and stable.
 - **No CGPA/GPA.** A subject result is points earned divided by maximum points, converted to a percentage, then mapped through the school's grade bands for that session and Primary/Secondary stage. Grade bands are school-configured; do not invent or seed a universal scale.
 - A blank required component is incomplete, not zero. Reject out-of-range values; never silently clamp imported scores. Use decimal arithmetic and preserve calculation precision.
 - Overall average is implemented on report cards and master-sheet rows as the equal-weight mean of subject percentages, only when every assigned subject is complete and approved (never counting missing as zero). It is separate from per-subject grades. Its grade comes from the exact average through bands only when every subject snapshot froze identical bands. Class position uses exact averages with competition ranking (equal averages share a position, next skipped) over the frozen approved roster and appears only when every subject is approved with matching rosters. A School Profile setting chooses whether report cards print position or average grade. Report cards are one A4 page per student with stepwise tightening for many subjects. Position never decides a subject grade; see `docs/ASSESSMENT_POLICY.md` items 8-10.
 - Draft scores require explicit saving. Approval locks complete results. Corrections after approval require administrator authority, a reason, and audit history. Teacher reads/writes must remain scoped to active assigned class-subjects.
-- Preserve the CSV roster import/template and approved PDF report, subject-sheet, and master-sheet workflows.
+- Preserve CSV and Excel roster/score import templates and the approved PDF report, subject-sheet, and master-sheet workflows.
+- Current usability work: Grade Entry places a compact student search (max 360 px) beside its title, shows a 300 px name column, hides the nonessential Status column, and lays six actions in one row on wide windows. Student Register keeps Import and Excel template actions in its main toolbar. Recheck these at native Windows display scaling and narrower window sizes before release.
 
 ## Fees and payments
 
@@ -54,6 +55,16 @@
 - Use only temporary databases and synthetic records for tests. Never point tests at a school's active database or overwrite a database to make a test pass.
 - Keep migrations additive and preserve user data. Back up and verify an existing database before migrations; do not replace the original file.
 - Keep local app data offline-first and local. Do not introduce network calls or telemetry without explicit approval.
+
+## Remaining work — prioritize in this order
+
+1. **Native Windows usability review (highest priority).** Review Grade Entry, Student Register/import, Fees/Payments, Attendance, report-card dialogs, and the main navigation at common laptop resolutions and Windows scaling settings. Check that the key columns and names are visible at a glance, labels are understandable, buttons are not clipped, keyboard navigation works, dialogs fit, and the app remains responsive while loading. The latest synthetic offscreen check is not a substitute for running the app on Windows.
+2. **Assessment policy decisions before implementation.** The school must define assessment weighting, absent/exempt score handling, and an authorized reopen/reapproval lifecycle. Do not implement policy from guesses. Confirm report-card wording and the handling of withdrawn students and cumulative/annual position with the school.
+3. **Attendance policy.** Add late/excused states only after the school defines what each state means and how it affects attendance summaries and reports.
+4. **Fee workflow decisions and gaps.** Get a school review of collection/reconciliation practices. Design cross-session student-first lookup, annual/session-wide fee schedules, invoice generation on term change, fee statistics, and school-configurable currency display without assuming billing rules or currency. Native XLSX workbook support is already present; avoid duplicating it.
+5. **CBT scope.** The removed Question Bank is not part of the current rebuild. The current administrator-started FastAPI component is a LAN health-check foundation only; exam authoring, candidate access, answer persistence/recovery, marking, and duplicate submission handling remain unimplemented. Write the exam and network safety specification before adding those workflows.
+6. **Operations and release readiness.** Complete the live operational backup/restore review, validate imports for any remaining general records, run the full tests and performance checks on the target Windows environment, build and exercise the installer, and review accessibility/security before release. Encryption and public/cloud synchronization are deferred; retain offline operation.
+7. **Communication Center.** The offline templates/outbox/history/consent workflows exist and do not send messages automatically. Native Windows review remains; any SMTP/WhatsApp delivery adapter needs an explicit product and security decision. Do not describe the center as absent or silently enable network sending.
 
 ## Development and verification
 
@@ -81,11 +92,12 @@
 - `docs/ASSESSMENT_POLICY.md`
 - `docs/PACKAGING.md` (Windows installer build)
 
-## Last verified checkpoint
+## Last verified checkpoint — 2026-10-27
 
-- Full test suite (without PyQt6, so Qt-dependent tests excluded or skipped): 227 passed, 10 skipped; the same 8 Qt tests fail only because PyQt6 is missing. Run the full suite with PyQt6 before relying on this.
-- Syntax compilation: passed.
-- Qt UI coverage ran offscreen; a native Windows visual review was not performed.
-- Re-run the checks in the coding environment before relying on this checkpoint.
-
-The project docs may lag recent UI behavior. In particular, keep the CA/Exam first-use defaults and the current no-CGPA/overall-average/class-position behavior described consistently across the code, tests, README, and assessment policy.
+- `.venv\\Scripts\\python.exe -m py_compile smartschool\\assessment_ui.py smartschool\\ui.py smartschool\\theme.py`: passed after the latest UI changes.
+- `.venv\\Scripts\\python.exe -m pytest -q -p no:debugging --basetemp .pytest-handoff-20261027`: 312 passed in 153.37 seconds.
+- `.venv\\Scripts\\python.exe -m compileall -q main.py smartschool tests`: passed.
+- Synthetic offscreen Grade Entry check: passed. Confirmed the compact search is at the title row, student-name width is 300 px, Status is hidden, and all six action controls occupy one row at a 1600 px page width.
+- `git diff --check`: passed; Git emitted only existing LF/CRLF working-copy notices.
+- The full test suite and a native Windows visual review were not run for this checkpoint. Do not claim either passed. No native app was launched and no school data was read.
+- Re-run focused and full tests before release. Keep the CA/Exam first-use defaults, no-CGPA rule, overall-average behavior, and policy-dependent position behavior consistent with `docs/ASSESSMENT_POLICY.md`, tests, and the implementation.

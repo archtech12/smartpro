@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QMarginsF, QThreadPool, Qt, QUrl
+from PyQt6.QtCore import QMarginsF, QThreadPool, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QFontDatabase, QImage, QPageLayout, QPageSize, QPdfWriter, QPainter, QTextDocument
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QGridLayout,
+    QAbstractItemView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -28,7 +30,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QToolButton,
     QMenu,
-    QToolBar,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -46,10 +48,13 @@ class ReportCardDetailsDialog(QDialog):
 
     def __init__(self, details: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Report card ratings and remarks")
+        self.setWindowTitle("Optional report-card skills and remarks")
         self.resize(620, 680)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Complete these optional fields before exporting report cards."))
+        layout.addWidget(QLabel(
+            "These are optional report-card observations, not exam marks. Leave any field as Not rated; "
+            "the report card includes this section only when at least one rating is entered."
+        ))
         form = QFormLayout()
         self.psychomotor = {}
         self.affective = {}
@@ -93,6 +98,21 @@ class ReportCardDetailsDialog(QDialog):
         )
 
 
+class LiveScoreDelegate(QStyledItemDelegate):
+    """Emit score text changes before a table editor is committed."""
+
+    text_changed = pyqtSignal(int, int, str)
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            row, column = index.row(), index.column()
+            editor.textEdited.connect(
+                lambda text, r=row, c=column: self.text_changed.emit(r, c, text)
+            )
+        return editor
+
+
 class GradeEntryPage(QWidget):
     def __init__(self, username: str, role: str):
         super().__init__()
@@ -119,13 +139,24 @@ class GradeEntryPage(QWidget):
         self._loading = False
         self._writing = False
         self._rendering = False
+        self._responsive_columns = None
         self._thread_pool = QThreadPool.globalInstance()
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
         title = QLabel("Grade entry")
         title.setObjectName("heading")
-        layout.addWidget(title)
-        selectors = QHBoxLayout()
+        title_row = QHBoxLayout()
+        title_row.addWidget(title)
+        layout.addLayout(title_row)
+        instructions = QLabel(
+            "Choose a session, term, class, and subject. Enter CA and Exam marks; Total and Grade preview as you type."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+        self.selector_grid = QGridLayout()
+        self.selector_grid.setHorizontalSpacing(10)
+        self.selector_grid.setVerticalSpacing(6)
         self.session_filter = QComboBox()
         self.term_filter = QComboBox()
         self.class_filter = QComboBox()
@@ -138,28 +169,35 @@ class GradeEntryPage(QWidget):
         self.term_filter.currentIndexChanged.connect(self.refresh)
         self.class_filter.currentIndexChanged.connect(self._class_changed)
         self.assignment_filter.currentIndexChanged.connect(self.refresh)
-        for label, combo, stretch in (
-            ("Session", self.session_filter, 1), ("Term", self.term_filter, 1),
-            ("Class", self.class_filter, 1), ("Subject", self.assignment_filter, 2),
+        self._selector_groups = []
+        for label, combo in (
+            ("Session", self.session_filter), ("Term", self.term_filter),
+            ("Class", self.class_filter), ("Subject", self.assignment_filter),
         ):
-            selectors.addWidget(QLabel(label))
-            selectors.addWidget(combo, stretch)
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.refresh)
-        selectors.addWidget(self.refresh_button)
-        layout.addLayout(selectors)
+            group = QWidget()
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            group_layout.setSpacing(3)
+            label_widget = QLabel(label)
+            label_widget.setObjectName("fieldLabel")
+            group_layout.addWidget(label_widget)
+            group_layout.addWidget(combo)
+            self._selector_groups.append(group)
+        layout.addLayout(self.selector_grid)
 
         self.student_search = QLineEdit()
         self.student_search.setClearButtonEnabled(True)
-        self.student_search.setPlaceholderText("Search student name or admission number…")
+        self.student_search.setPlaceholderText("Find student by name or admission no.")
+        self.student_search.setMinimumWidth(160)
+        self.student_search.setMaximumWidth(360)
         self.student_search.setAccessibleName("Search students in the selected class roster")
         self.student_search.textChanged.connect(self._filter_students)
         self.roster_count = QLabel("0 students")
+        self.roster_count.setObjectName("muted")
+        title_row.addStretch(1)
+        title_row.addWidget(self.student_search)
+        title_row.addWidget(self.roster_count)
 
-        workflow_actions = QToolBar("Grade-entry actions")
-        workflow_actions.setMovable(False)
-        workflow_actions.setFloatable(False)
-        workflow_actions.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.save_button = QPushButton("Save All Grades")
         self.save_button.setObjectName("primary")
         self.save_button.setToolTip("Save all entered scores for this class and subject.")
@@ -186,8 +224,11 @@ class GradeEntryPage(QWidget):
         self.report_button = self.reports_menu.addAction("Student report card PDF")
         self.class_cards_button = self.reports_menu.addAction("Class report cards PDF")
         self.reports_menu.addSeparator()
-        self.report_details_action = self.reports_menu.addAction("Edit ratings and remarks")
-        self.result_sheet_button = QPushButton("Export Subject")
+        self.report_details_action = self.reports_menu.addAction("Optional skills & remarks")
+        self.report_details_action.setToolTip(
+            "Enter optional psychomotor and affective ratings for the selected student's report card."
+        )
+        self.result_sheet_button = QPushButton("Export Subject Sheet")
         self.master_sheet_button = QPushButton("Export Master Sheet")
         self.report_button.setToolTip("Export the selected student's approved report card as a PDF.")
         self.class_cards_button.setToolTip("Export one approved report-card page for each student in the class.")
@@ -202,16 +243,14 @@ class GradeEntryPage(QWidget):
         self.report_details_action.triggered.connect(self.edit_report_card_details)
         self.result_sheet_button.clicked.connect(self.export_result_sheet)
         self.master_sheet_button.clicked.connect(self.export_master_sheet)
-        for button in (
+        self._workflow_buttons = (
             self.import_button, self.result_sheet_button, self.master_sheet_button,
             self.save_button, self.more_button, self.reports_button,
-        ):
-            workflow_actions.addWidget(button)
-        workflow = QHBoxLayout()
-        workflow.addWidget(self.student_search, 1)
-        workflow.addWidget(self.roster_count)
-        workflow.addWidget(workflow_actions, 3)
-        layout.addLayout(workflow)
+        )
+        self.action_grid = QGridLayout()
+        self.action_grid.setHorizontalSpacing(8)
+        self.action_grid.setVerticalSpacing(6)
+        layout.addLayout(self.action_grid)
 
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(True)
@@ -221,12 +260,21 @@ class GradeEntryPage(QWidget):
             | QTableWidget.EditTrigger.EditKeyPressed
             | QTableWidget.EditTrigger.AnyKeyPressed
         )
-        self.table.setToolTip("Select a score cell and type. Press Tab to move through score cells.")
+        self._score_delegate = LiveScoreDelegate(self.table)
+        self._score_delegate.text_changed.connect(self._live_score_changed)
+        self.table.setItemDelegate(self._score_delegate)
+        self.table.setToolTip("Select a score cell and type. Total and Grade preview update while you type; press Tab to move to the next score.")
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setMinimumHeight(120)
+        self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.itemChanged.connect(self._score_changed)
         self.table.itemSelectionChanged.connect(self._set_actions)
         layout.addWidget(self.table, 1)
         self.status = QLabel("Loading grade-entry setup…")
         layout.addWidget(self.status)
+        self.status.setWordWrap(True)
+        self._relayout_responsive_controls()
         if self.can_open_grade_entry:
             self.refresh()
         else:
@@ -235,10 +283,37 @@ class GradeEntryPage(QWidget):
             self.assignment_filter.setEnabled(False)
             self.term_filter.setEnabled(False)
             self.save_button.setEnabled(False)
-            self.refresh_button.setEnabled(False)
             self.status.setText(
                 "Grade entry is available to administrators and linked teachers with assigned class-subjects."
             )
+
+    def _relayout_responsive_controls(self):
+        if not hasattr(self, "selector_grid"):
+            return
+        width = max(1, self.contentsRect().width())
+        selector_columns = 4 if width >= 980 else 2 if width >= 600 else 1
+        action_columns = 6 if width >= 1200 else 3 if width >= 760 else 2 if width >= 520 else 1
+        columns_by_grid = (selector_columns, action_columns)
+        if columns_by_grid == self._responsive_columns:
+            return
+        self._responsive_columns = columns_by_grid
+        for grid, widgets, columns in (
+            (self.selector_grid, self._selector_groups, selector_columns),
+            (self.action_grid, self._workflow_buttons, action_columns),
+        ):
+            while grid.count():
+                grid.takeAt(0)
+            for column in range(6):
+                grid.setColumnStretch(column, 0)
+            for index, widget in enumerate(widgets):
+                grid.addWidget(widget, index // columns, index % columns)
+                widget.setMinimumHeight(36)
+            for column in range(columns):
+                grid.setColumnStretch(column, 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout_responsive_controls()
 
     def _session_changed(self, *_args):
         for combo in (self.class_filter, self.assignment_filter, self.term_filter):
@@ -439,6 +514,10 @@ class GradeEntryPage(QWidget):
         self.table.horizontalHeaderItem(5 + len(self._components)).setToolTip(
             "Grade calculated from the school's grade scale for this session and school stage."
         )
+        # Keep the calculated values available to assistive tools and internal workflows,
+        # but hide them from the entry grid to match the school's compact CA/Exam layout.
+        self.table.setColumnHidden(3 + len(self._components), True)
+        self.table.setColumnHidden(4 + len(self._components), True)
         for offset, component in enumerate(self._components):
             self.table.horizontalHeaderItem(2 + offset).setToolTip(
                 f"Enter a score from 0 to {component['max_score']} points."
@@ -454,12 +533,32 @@ class GradeEntryPage(QWidget):
             for offset, component in enumerate(self._components):
                 value = scores.get(int(component["id"]))
                 score_item = QTableWidgetItem(value or "")
+                score_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if self._approval and not self._correction_mode:
                     score_item.setFlags(score_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(row_index, first_score_col + offset, score_item)
             result = student.get("result") or self._calculate_preview(scores)
             self._show_result(row_index, result_col, result)
-        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, 128)
+        self.table.horizontalHeader().setMaximumSectionSize(340)
+        self.table.setColumnWidth(1, 300)
+        for offset in range(len(self._components)):
+            self.table.setColumnWidth(first_score_col + offset, 140)
+        self.table.setColumnWidth(result_col, 78)
+        self.table.setColumnWidth(result_col + 1, 88)
+        self.table.setColumnWidth(result_col + 2, 92)
+        self.table.setColumnWidth(result_col + 3, 88)
+        self.table.setColumnWidth(result_col + 4, 118)
+        # Draft completeness remains available to internal workflows, but the
+        # Status column adds little during score entry and steals roster width.
+        self.table.setColumnHidden(result_col + 4, True)
+        for row_index, student in enumerate(self._students):
+            name_item = self.table.item(row_index, 1)
+            if name_item is not None:
+                name_item.setToolTip(
+                    f"{student['last_name']}, {student['first_name']}\n"
+                    f"Admission number: {student['admission_no']}"
+                )
         self._rendering = False
 
     @staticmethod
@@ -469,12 +568,34 @@ class GradeEntryPage(QWidget):
         return item
 
     def _calculate_preview(self, scores):
-        if not self._components or not self._bands:
+        if not self._components:
             return None
-        try:
-            return db.calculate_assessment_result(self._components, scores, self._bands)
-        except ValueError:
-            return None
+        if self._bands:
+            try:
+                return db.calculate_assessment_result(self._components, scores, self._bands)
+            except ValueError:
+                pass
+        maximum = sum((Decimal(str(item["max_score"])) for item in self._components), Decimal(0))
+        earned = Decimal(0)
+        missing = False
+        for component in self._components:
+            value = scores.get(int(component["id"]))
+            if value is None:
+                missing = True
+            else:
+                earned += Decimal(str(value))
+        complete = not missing
+        percentage = earned * Decimal(100) / maximum if complete and maximum else None
+        return {
+            "complete": complete,
+            "points_earned": str(earned),
+            "points_possible": str(maximum),
+            "display_percentage": (
+                str(percentage.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                if percentage is not None else None
+            ),
+            "grade_label": None,
+        }
 
     def _show_result(self, row_index, result_col, result):
         if not result:
@@ -482,14 +603,19 @@ class GradeEntryPage(QWidget):
         elif result["complete"]:
             values = (
                 result["points_earned"], result["points_possible"],
-                result["display_percentage"], result["grade_label"] or "No band", "Complete draft",
+                result.get("display_percentage") or "—",
+                result.get("grade_label") or ("Set grade scale" if not self._bands else "No band"),
+                "Complete draft" if self._bands else "Setup required",
             )
         else:
             values = (
                 result["points_earned"], result["points_possible"], "Incomplete", "—", "Incomplete draft",
             )
         for offset, value in enumerate(values):
-            self.table.setItem(row_index, result_col + offset, self._readonly(value))
+            item = self._readonly(value)
+            if offset != 4:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row_index, result_col + offset, item)
 
     def _filter_students(self, *_args):
         if not hasattr(self, "student_search"):
@@ -513,26 +639,42 @@ class GradeEntryPage(QWidget):
     def _score_changed(self, item):
         if self._rendering or item.column() < 2 or item.column() >= 2 + len(self._components):
             return
-        component = self._components[item.column() - 2]
-        value = item.text().strip()
+        self._refresh_row_preview(item.row(), item.column(), item.text())
+
+    def _live_score_changed(self, row, column, value):
+        if self._rendering or column < 2 or column >= 2 + len(self._components):
+            return
+        self._refresh_row_preview(row, column, value)
+
+    def _refresh_row_preview(self, row, changed_column, changed_value):
+        component = self._components[changed_column - 2]
+        value = changed_value.strip()
         if value:
             try:
                 db.validate_assessment_score(value, component["max_score"])
             except ValueError:
-                item.setBackground(Qt.GlobalColor.red)
+                score_item = self.table.item(row, changed_column)
+                if score_item is not None:
+                    score_item.setBackground(Qt.GlobalColor.red)
             else:
-                item.setBackground(Qt.GlobalColor.white)
+                score_item = self.table.item(row, changed_column)
+                if score_item is not None:
+                    score_item.setBackground(Qt.GlobalColor.white)
         else:
-            item.setBackground(Qt.GlobalColor.white)
+            score_item = self.table.item(row, changed_column)
+            if score_item is not None:
+                score_item.setBackground(Qt.GlobalColor.white)
         scores = {}
         for offset, definition in enumerate(self._components):
-            cell = self.table.item(item.row(), 2 + offset)
-            if cell and cell.text().strip():
+            column = 2 + offset
+            cell = self.table.item(row, column)
+            text = changed_value if column == changed_column else cell.text() if cell else ""
+            if text.strip():
                 try:
-                    scores[int(definition["id"])] = db.validate_assessment_score(cell.text(), definition["max_score"])
+                    scores[int(definition["id"])] = db.validate_assessment_score(text, definition["max_score"])
                 except ValueError:
                     pass
-        self._show_result(item.row(), 2 + len(self._components), self._calculate_preview(scores))
+        self._show_result(row, 2 + len(self._components), self._calculate_preview(scores))
 
     def _set_actions(self):
         ready = (
@@ -580,7 +722,6 @@ class GradeEntryPage(QWidget):
         self.result_sheet_button.setEnabled(can_export)
         self.master_sheet_button.setEnabled(can_export)
         self.reports_button.setEnabled(can_export or self.report_button.isEnabled())
-        self.refresh_button.setEnabled(not self._loading and not self._writing)
         for combo in (self.session_filter, self.term_filter, self.class_filter, self.assignment_filter):
             combo.setEnabled(not self._writing and self.can_open_grade_entry)
         self.table.setEnabled(not self._loading and not self._writing and self.can_open_grade_entry)
@@ -1219,10 +1360,14 @@ class GradeEntryPage(QWidget):
             "</tr>"
             for skill, trait in zip(db.PSYCHOMOTOR_SKILLS, db.AFFECTIVE_TRAITS)
         )
+        has_ratings = any(psychomotor.get(name) for name in db.PSYCHOMOTOR_SKILLS) or any(
+            affective.get(name) for name in db.AFFECTIVE_TRAITS
+        )
         skills_html = (
             "<table class='skills'><thead><tr><th colspan='2'>PSYCHOMOTOR SKILLS</th>"
             "<th colspan='2'>AFFECTIVE TRAITS</th></tr></thead><tbody>"
             + skills_rows + "</tbody></table>"
+            if has_ratings else ""
         )
         comments_html = (
             "<div class='comments'><b>TEACHER'S REMARK:</b><br>"

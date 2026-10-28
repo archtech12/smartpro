@@ -29,6 +29,7 @@ from .user_accounts_ui import UserAccountsPage
 from .diagnostics_ui import DiagnosticsPage
 from .fees_ui import FeeInvoicePage, FeeReconciliationPage, FeeSetupPage
 from .communication_ui import CommunicationCenterPage
+from .cbt_server import CbtServerController
 from .security_ui import AuditLogPage, ChangePasswordDialog
 from .security import hash_password, verify_password
 from .workers import BackgroundTask
@@ -185,10 +186,29 @@ class AddDialog(QDialog):
         self.inputs = []
         layout = QFormLayout(self)
         for index, (field, label) in enumerate(db.MODULES[module_name]["fields"]):
-            edit = QLineEdit()
+            if module_name == "Classes" and field == "section":
+                edit = QComboBox()
+                edit.setEditable(True)
+                edit.addItems(["A", "B", "C", "D", "Main"])
+                edit.setCurrentText("")
+                edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                edit.setPlaceholderText("Choose or type a section")
+            elif module_name == "Subjects" and field == "level":
+                edit = QComboBox()
+                edit.setEditable(True)
+                edit.addItems(["Primary", "Secondary", "Both"])
+                edit.setCurrentText("")
+                edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                edit.setPlaceholderText("Optional: Primary, Secondary, or Both")
+            else:
+                edit = QLineEdit()
             edit.setPlaceholderText(label)
             if values is not None:
-                edit.setText(str(values[index] if values[index] is not None else ""))
+                text = str(values[index] if values[index] is not None else "")
+                if isinstance(edit, QComboBox):
+                    edit.setCurrentText(text)
+                else:
+                    edit.setText(text)
                 if module_name == "Students" and field in {"admission_no", "class_name"}:
                     edit.setReadOnly(True)
             self.inputs.append(edit)
@@ -199,7 +219,7 @@ class AddDialog(QDialog):
         layout.addRow(buttons)
 
     def values(self):
-        return [w.text() for w in self.inputs]
+        return [w.currentText() if isinstance(w, QComboBox) else w.text() for w in self.inputs]
 
 
 class StudentProfileDialog(QDialog):
@@ -468,10 +488,14 @@ class ModulePage(QWidget):
         self.import_btn = None
         self.template_btn = None
         if module_name == "Students":
-            self.import_btn = QPushButton("Import students (Excel/CSV)…")
+            self.import_btn = QPushButton("Import students…")
+            self.import_btn.setToolTip("Import a class roster from an Excel workbook or CSV file.")
             self.import_btn.clicked.connect(self.import_students_csv)
             self.template_btn = QPushButton("Excel template")
+            self.template_btn.setToolTip("Download a ready-to-fill Excel student roster template.")
             self.template_btn.clicked.connect(self.export_student_template)
+            header.addWidget(self.import_btn)
+            header.addWidget(self.template_btn)
         self.edit_btn = QPushButton("Edit selected")
         if module_name == "Students":
             self.edit_btn.setText("Edit student details")
@@ -482,13 +506,6 @@ class ModulePage(QWidget):
         self.export_btn.clicked.connect(self.export)
         header.addWidget(self.export_btn)
         layout.addLayout(header)
-        if self.import_btn is not None:
-            roster_tools = QHBoxLayout()
-            roster_tools.addWidget(QLabel("Register a class roster from a file:"))
-            roster_tools.addWidget(self.template_btn)
-            roster_tools.addWidget(self.import_btn)
-            roster_tools.addStretch()
-            layout.addLayout(roster_tools)
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -909,6 +926,7 @@ def _load_dashboard_payload(username):
 
 class Dashboard(QWidget):
     navigation_requested = pyqtSignal(str)
+    cbt_server_action_requested = pyqtSignal(str)
 
     def __init__(self, role="admin", username=""):
         super().__init__()
@@ -1000,9 +1018,50 @@ class Dashboard(QWidget):
         for column in range(4):
             actions.setColumnStretch(column, 1)
         layout.addLayout(actions)
+        if not self.is_teacher:
+            self.cbt_server_button = QPushButton("Start CBT Server")
+            self.cbt_server_button.setObjectName("dashboardAction")
+            self.cbt_server_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.cbt_server_button.setToolTip("Start the school-network FastAPI service")
+            self.cbt_server_button.clicked.connect(self._toggle_cbt_server)
+            self.cbt_server_status = QLabel("CBT server is stopped")
+            self.cbt_server_status.setWordWrap(True)
+            layout.addWidget(self.cbt_server_button)
+            layout.addWidget(self.cbt_server_status)
         layout.addStretch()
         if not self.is_teacher:
             self.refresh()
+
+    def _toggle_cbt_server(self):
+        action = "stop" if self.cbt_server_button.text() == "Stop CBT Server" else "start"
+        self.cbt_server_button.setEnabled(False)
+        self.cbt_server_action_requested.emit(action)
+
+    def set_cbt_server_status(self, status):
+        if self.is_teacher:
+            return
+        state = status["state"]
+        if state == "running":
+            self.cbt_server_button.setText("Stop CBT Server")
+            urls = status.get("urls") or []
+            url_text = "\n".join(urls) if urls else "No school-network IPv4 address was detected."
+            self.cbt_server_status.setText(
+                "FastAPI is running on the school network. Health check:\n" + url_text
+                + "\nExam login and delivery are not implemented yet."
+            )
+            self.cbt_server_button.setEnabled(True)
+        elif state in {"starting", "stopping"}:
+            self.cbt_server_button.setText("Starting CBT Server…" if state == "starting" else "Stopping CBT Server…")
+            self.cbt_server_status.setText("Starting the local-network service…" if state == "starting" else "Stopping the service…")
+            self.cbt_server_button.setEnabled(False)
+        elif state == "failed":
+            self.cbt_server_button.setText("Start CBT Server")
+            self.cbt_server_status.setText("Could not start the CBT server: " + status.get("error", "Unknown error"))
+            self.cbt_server_button.setEnabled(True)
+        else:
+            self.cbt_server_button.setText("Start CBT Server")
+            self.cbt_server_status.setText("CBT server is stopped")
+            self.cbt_server_button.setEnabled(True)
 
     def refresh(self):
         if self.is_teacher:
@@ -1616,6 +1675,12 @@ class MainWindow(QMainWindow):
         dash = Dashboard(self.user["role"], self.user["username"])
         self.pages["Dashboard"] = dash
         dash.navigation_requested.connect(self.show_page)
+        if self.user["role"] != "teacher":
+            self._cbt_server = CbtServerController()
+            dash.cbt_server_action_requested.connect(self._cbt_server_action)
+            self._cbt_server_timer = QTimer(self)
+            self._cbt_server_timer.timeout.connect(self._sync_cbt_server_status)
+            self._cbt_server_timer.start(600)
         self.stack.addWidget(dash)
         nav_tabs = QTabWidget()
         nav_tabs.setObjectName("navTabs")
@@ -1698,6 +1763,27 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence("F5"), self, activated=self.refresh_current_page),
             QShortcut(QKeySequence("Ctrl+K"), self, activated=self._focus_nav_filter),
         ]
+
+    def _cbt_server_action(self, action):
+        try:
+            if action == "start":
+                self._cbt_server.start()
+            else:
+                self._cbt_server.stop()
+            self._sync_cbt_server_status()
+        except Exception as exc:
+            QMessageBox.warning(self, "CBT server", f"Could not change server state: {exc}")
+            self._sync_cbt_server_status()
+
+    def _sync_cbt_server_status(self):
+        dashboard = self.pages.get("Dashboard")
+        if dashboard is not None and hasattr(self, "_cbt_server"):
+            dashboard.set_cbt_server_status(self._cbt_server.status())
+
+    def closeEvent(self, event):
+        if hasattr(self, "_cbt_server"):
+            self._cbt_server.stop()
+        super().closeEvent(event)
 
     def change_password(self):
         try:

@@ -31,3 +31,7 @@ The local SQLite database contains account credentials, student/staff records, a
 ## Operational rules
 
 Use temporary databases and synthetic identities in tests. Never point automated tests at `%LOCALAPPDATA%` school data. Back up and verify before data migrations/imports. Never alter the legacy installation, installer, or production database. Treat backups and exported reports as sensitive school records.
+
+## Optional CBT server
+
+The administrator may start a FastAPI service bound to the school computer's network interfaces. In this foundation slice, `/health` is the only route; it returns service status and does not access the school database. The listener is stopped when the desktop app closes. Exam routes must not be added until candidate authentication, authorization, request limits, answer persistence, and recovery behavior are designed and reviewed. Do not expose the service through public port forwarding.
