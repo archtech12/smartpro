@@ -214,6 +214,7 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
     with db.connection() as conn:  # roll the schema back to v22 the way a pre-upgrade database looks
         conn.execute("DROP INDEX idx_fee_payments_lump_sum")
         conn.execute("ALTER TABLE fee_payments DROP COLUMN lump_sum_number")
+        conn.execute("DROP TABLE report_card_details")
         for column in ("report_ranking_style", "head_signature", "class_teacher_signature", "admission_id_prefix"):
             conn.execute(f"ALTER TABLE school_profile DROP COLUMN {column}")
         conn.execute("DELETE FROM schema_migrations WHERE version>22")
@@ -223,7 +224,7 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
 
     with db.connection() as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-7:] == [23, 24, 25, 26, 27, 28, 29]
+        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-8:] == [23, 24, 25, 26, 27, 28, 29, 30]
         assert "lump_sum_number" in {row[1] for row in conn.execute("PRAGMA table_info(fee_payments)")}
     assert db.load_school_profile()["school_name"] == "Kept School"
     assert db.load_school_profile()["admission_id_prefix"] == "ADM"

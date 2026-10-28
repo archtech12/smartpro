@@ -5,17 +5,24 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from html import escape
+import os
+from pathlib import Path
 
 from PyQt6.QtCore import QMarginsF, QThreadPool, Qt, QUrl
-from PyQt6.QtGui import QAction, QImage, QPageLayout, QPageSize, QPdfWriter, QPainter, QTextDocument
+from PyQt6.QtGui import QAction, QFont, QFontDatabase, QImage, QPageLayout, QPageSize, QPdfWriter, QPainter, QTextDocument
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
+    QApplication,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -32,6 +39,58 @@ from . import database as db
 from . import tabular
 from .score_import import preview_score_import, write_score_template
 from .workers import BackgroundTask
+
+
+class ReportCardDetailsDialog(QDialog):
+    """Edit the school ratings and remarks printed on the selected learner's report."""
+
+    def __init__(self, details: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Report card ratings and remarks")
+        self.resize(620, 680)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Complete these optional fields before exporting report cards."))
+        form = QFormLayout()
+        self.psychomotor = {}
+        self.affective = {}
+        ratings = [("Not rated", ""), *((label, label) for label in db.REPORT_CARD_RATINGS)]
+        for section, labels, target, saved_key in (
+            ("Psychomotor skills", db.PSYCHOMOTOR_SKILLS, self.psychomotor, "psychomotor"),
+            ("Affective traits", db.AFFECTIVE_TRAITS, self.affective, "affective"),
+        ):
+            form.addRow(QLabel(f"<b>{section}</b>"), QLabel(""))
+            saved = details.get(saved_key, {})
+            for label in labels:
+                combo = QComboBox()
+                combo.setAccessibleName(label)
+                for text, value in ratings:
+                    combo.addItem(text, value)
+                combo.setCurrentIndex(max(0, combo.findData(saved.get(label, ""))))
+                target[label] = combo
+                form.addRow(label, combo)
+        self.teacher_remark = QPlainTextEdit(details.get("teacher_remark", ""))
+        self.teacher_remark.setPlaceholderText("Optional class-teacher comment")
+        self.teacher_remark.setMaximumHeight(74)
+        self.teacher_remark.setAccessibleName("Teacher remark")
+        form.addRow("Teacher remark", self.teacher_remark)
+        self.principal_remark = QPlainTextEdit(details.get("principal_remark", ""))
+        self.principal_remark.setPlaceholderText("Optional principal comment")
+        self.principal_remark.setMaximumHeight(74)
+        self.principal_remark.setAccessibleName("Principal remark")
+        form.addRow("Principal remark", self.principal_remark)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        return (
+            {name: combo.currentData() for name, combo in self.psychomotor.items()},
+            {name: combo.currentData() for name, combo in self.affective.items()},
+            self.teacher_remark.toPlainText(),
+            self.principal_remark.toPlainText(),
+        )
 
 
 class GradeEntryPage(QWidget):
@@ -126,6 +185,8 @@ class GradeEntryPage(QWidget):
         self.reports_menu = QMenu(self.reports_button)
         self.report_button = self.reports_menu.addAction("Student report card PDF")
         self.class_cards_button = self.reports_menu.addAction("Class report cards PDF")
+        self.reports_menu.addSeparator()
+        self.report_details_action = self.reports_menu.addAction("Edit ratings and remarks")
         self.result_sheet_button = QPushButton("Export Subject")
         self.master_sheet_button = QPushButton("Export Master Sheet")
         self.report_button.setToolTip("Export the selected student's approved report card as a PDF.")
@@ -138,6 +199,7 @@ class GradeEntryPage(QWidget):
         self.correct_button.triggered.connect(self.toggle_correction)
         self.report_button.triggered.connect(self.export_report_card)
         self.class_cards_button.triggered.connect(self.export_class_report_cards)
+        self.report_details_action.triggered.connect(self.edit_report_card_details)
         self.result_sheet_button.clicked.connect(self.export_result_sheet)
         self.master_sheet_button.clicked.connect(self.export_master_sheet)
         for button in (
@@ -513,6 +575,7 @@ class GradeEntryPage(QWidget):
             and self._approval is not None and not self._correction_mode and self.table.currentRow() >= 0
         )
         can_export = self.is_admin and not self._loading and not self._writing and self._approval is not None and not self._correction_mode
+        self.report_details_action.setEnabled(can_export and self.table.currentRow() >= 0)
         self.class_cards_button.setEnabled(can_export)
         self.result_sheet_button.setEnabled(can_export)
         self.master_sheet_button.setEnabled(can_export)
@@ -713,6 +776,50 @@ class GradeEntryPage(QWidget):
         worker.signals.finished.connect(self._report_data_loaded)
         self._workers[("report", write_id)] = worker
         self._thread_pool.start(worker)
+
+    def edit_report_card_details(self):
+        row_index = self.table.currentRow()
+        if not self.report_details_action.isEnabled() or not 0 <= row_index < len(self._students):
+            return
+        student = self._students[row_index]
+        enrollment_id = int(student["enrollment_id"])
+        term_id = int(self.term_filter.currentData())
+        try:
+            details = db.load_report_card_details(enrollment_id, term_id, self.username)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not load report card details", str(exc))
+            return
+        dialog = ReportCardDetailsDialog(details, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        psychomotor, affective, teacher_remark, principal_remark = dialog.values()
+        self._writing = True
+        self._set_actions()
+        self.status.setText("Saving report card ratings and remarks…")
+        self._write_id += 1
+        write_id = self._write_id
+        worker = BackgroundTask(
+            write_id,
+            lambda: db.save_report_card_details(
+                enrollment_id, term_id, psychomotor, affective,
+                teacher_remark, principal_remark, self.username,
+            ),
+        )
+        worker.signals.finished.connect(self._report_details_saved)
+        self._workers[("report-details", write_id)] = worker
+        self._thread_pool.start(worker)
+
+    def _report_details_saved(self, write_id, _result, error):
+        self._workers.pop(("report-details", write_id), None)
+        if write_id != self._write_id:
+            return
+        self._writing = False
+        if error is not None:
+            self.status.setText("Could not save report card details")
+            QMessageBox.warning(self, "Could not save report card details", str(error))
+        else:
+            self.status.setText("Report card ratings and remarks saved.")
+        self._set_actions()
 
     def export_class_report_cards(self):
         if not self._approval or self._correction_mode:
@@ -972,43 +1079,103 @@ class GradeEntryPage(QWidget):
         photo_data = student.get("photo_data")
         subjects = data["subjects"]
         compact_subject_grid = len(subjects) > 12
+        component_sets = [tuple(part["name"] for part in item.get("components", [])) for item in subjects]
+        common_components = bool(component_sets) and all(names == component_sets[0] for names in component_sets)
+        split_components = common_components and len(component_sets[0]) == 2
+
+        def component_label(name):
+            lower = name.casefold()
+            if "exam" in lower:
+                return "EXAM"
+            if "ca" in lower or "coursework" in lower:
+                return "CA"
+            return name
+
+        def component_score(item, component_index):
+            parts = item.get("components", [])
+            if component_index >= len(parts):
+                return "—"
+            part = parts[component_index]
+            return "—" if part.get("score") is None else f"{part['score']}/{part['maximum']}"
+
+        def subject_details(item):
+            parts = item.get("components", [])
+            scores = " · ".join(
+                f"{component_label(part['name'])}: {part['score'] if part['score'] is not None else '—'}/{part['maximum']}"
+                for part in parts
+            )
+            position_text = (item.get("position") or {}).get("position_text", "—")
+            return " · ".join(value for value in (
+                scores,
+                f"Total {item['points_earned']}/{item['points_possible']}",
+                f"Grade {item['grade_label'] or '—'}",
+                f"Pos {position_text}",
+                item.get("remark") or "" if show_remark else "",
+            ) if value)
+
         if compact_subject_grid:
-            cells = [
-                "<td><b>" + escape(f"{item['subject_code']} — {item['subject_name']}") + "</b><br>"
-                + f"Points: {escape(item['points_earned'])}/{escape(item['points_possible'])}"
-                + f" &nbsp; {escape(item['display_percentage'])}%"
-                + f" &nbsp; Grade: <b>{escape(item['grade_label'] or '')}</b>"
-                + (f" &nbsp; {escape(item['remark'] or '')}" if show_remark else "")
-                + "</td>"
-                for item in subjects
-            ]
-            rows = "".join("<tr>" + cells[index] + (cells[index + 1] if index + 1 < len(cells) else "<td></td>") + "</tr>" for index in range(0, len(cells), 2))
+            cells = []
+            for index, item in enumerate(subjects, 1):
+                cells.append(
+                    f"<td class='compact-subject'><span class='serial'>{index:02d}</span> "
+                    f"<b>{escape(item['subject_name'])}</b><br><span class='detail'>{escape(subject_details(item))}</span></td>"
+                )
+            rows = "".join(
+                "<tr>" + cells[index] + (cells[index + 1] if index + 1 < len(cells) else "<td></td>") + "</tr>"
+                for index in range(0, len(cells), 2)
+            )
+            column_header = "<th colspan='2'>SUBJECT RESULTS</th>"
         else:
             rows = "".join(
                 "<tr>"
-                f"<td>{escape(item['subject_code'])} — {escape(item['subject_name'])}</td>"
-                f"<td>{escape(item['points_earned'])} / {escape(item['points_possible'])}</td>"
-                f"<td>{escape(item['display_percentage'])}%</td>"
-                f"<td><b>{escape(item['grade_label'] or '')}</b></td>"
+                f"<td class='serial'>{index:02d}</td><td>{escape(item['subject_name'])}</td>"
+                + (f"<td>{escape(component_score(item, 0))}</td><td>{escape(component_score(item, 1))}</td>" if split_components
+                   else f"<td>{escape(subject_details(item))}</td>")
+                + f"<td><b>{escape(item['points_earned'])}</b></td>"
+                + f"<td><b>{escape(item['grade_label'] or '')}</b></td>"
+                + f"<td>{escape((item.get('position') or {}).get('position_text', '—'))}</td>"
                 + (f"<td>{escape(item['remark'] or '')}</td>" if show_remark else "")
                 + "</tr>"
-                for item in subjects
+                for index, item in enumerate(subjects, 1)
             )
+            component_headers = (
+                f"<th>{escape(component_label(component_sets[0][0]))}</th><th>{escape(component_label(component_sets[0][1]))}</th>"
+                if split_components else "<th>ASSESSMENT</th>"
+            )
+            column_header = "<th>S/N</th><th>SUBJECT</th>" + component_headers + "<th>TOTAL</th><th>GRADE</th><th>POS</th>"
+            if show_remark:
+                column_header += "<th>REMARK</th>"
         name = escape(f"{student['last_name']}, {student['first_name']}")
         stage = f" · {escape(data['educational_stage'])}" if data.get("educational_stage") else ""
         overall = data.get("overall")
         position = data.get("position")
         style = settings.get("ranking_style", "position")
-        summary = ""
+        summary_cells = []
+        total_earned = sum((Decimal(item["points_earned"]) for item in subjects), Decimal(0))
+        total_possible = sum((Decimal(item["points_possible"]) for item in subjects), Decimal(0))
+        summary_cells.append(
+            f"<td><b>TOTAL SCORE</b><br>{escape(db._decimal_text(total_earned))} / "
+            f"{escape(db._decimal_text(total_possible))} pts</td>"
+        )
         if overall and overall["complete"]:
-            parts = [f"<b>Overall average:</b> {escape(overall['display_average'])}% across {overall['subject_count']} subjects"]
+            performance = " ".join(part for part in (overall.get("grade_label") or "", overall.get("remark") or "") if part) or "—"
+            summary_cells.append(f"<td><b>AVERAGE</b><br>{escape(overall['display_average'])}%</td>")
             if style == "average_grade":
-                if overall.get("grade_label"):
-                    parts.append(f"<b>Average grade:</b> {escape(overall['grade_label'])} ({escape(overall['remark'] or '')})")
-            elif position:
+                rank_label = "AVERAGE GRADE"
+                rank_text = performance
+            else:
+                rank_label = "CLASS POSITION"
+                rank_text = performance if not position else "—"
+            if style == "position" and position:
                 tie = " (tied)" if position["tied"] else ""
-                parts.append(f"<b>Class position:</b> {escape(position['position_text'])} of {position['of']}{tie}")
-            summary = "<p class='summary'>" + " &nbsp;·&nbsp; ".join(parts) + "</p>"
+                rank_text = f"{position['position_text']} of {position['of']}{tie}"
+            if style == "position" and not position:
+                rank_label = "AVERAGE GRADE"
+            summary_cells.append(f"<td><b>{rank_label}</b><br>{escape(rank_text)}</td>")
+            summary_cells.append(f"<td><b>PERFORMANCE RESULT</b><br>{escape(performance)}</td>")
+        else:
+            summary_cells.extend(("<td><b>AVERAGE</b><br>Incomplete</td>", "<td><b>PERFORMANCE RESULT</b><br>—</td>"))
+        summary = "<table class='summary' border='1' cellpadding='3' cellspacing='0' bgcolor='#eaf3fa'><tr>" + "".join(summary_cells) + "</tr></table>"
         key = data.get("grade_key") or []
         key_html = (
             "<p class='key'><b>Grading key:</b> "
@@ -1018,40 +1185,90 @@ class GradeEntryPage(QWidget):
                 for item in key
             ) + "</p>" if key else ""
         )
-        shows_position = style != "average_grade" and bool(position) and bool(overall and overall["complete"])
-        position_note = " Class position ranks the unrounded overall average; equal averages share a position." if shows_position else ""
-        remark_header = "<th>Remark</th>" if show_remark and not compact_subject_grid else ""
         term_dates = GradeEntryPage._term_dates_html(settings)
         photo = "<td width='84' align='right'><img src='student-photo'></td>" if photo_data else ""
+        logo = "<img src='school-logo' width='74'>" if logo_data else ""
+        school_name = escape(profile.get("school_name", ""))
+        school_contact = "<br>".join(escape(profile.get(key, "")) for key in ("address", "phone", "email") if profile.get(key, ""))
+        gender = escape(student.get("gender") or "—")
+        if style == "average_grade":
+            class_position_label = "AVERAGE GRADE"
+            class_position_value = " ".join(part for part in (overall.get("grade_label") or "", overall.get("remark") or "") if part) or "—"
+        else:
+            class_position_label = "CLASS POSITION"
+            class_position_value = f"{position['position_text']} out of {position['of']}" if position else ""
+        position_row = (
+            f"<tr><td colspan='2'><b>{class_position_label}:</b> {escape(class_position_value)}</td>{'<td></td>' if photo_data else ''}</tr>"
+            if class_position_value else ""
+        )
+        attendance = data.get("attendance", {})
+        attendance_html = ""
+        if int(attendance.get("school_opened", 0)):
+            attendance_html = (
+                "<div class='attendance'><b>ATTENDANCE</b> &nbsp; "
+                f"School opened: {attendance['school_opened']} &nbsp; "
+                f"Present: {attendance['present']} &nbsp; Absent: {attendance['absent']}</div>"
+            )
+        details = data.get("report_card_details", {})
+        psychomotor = details.get("psychomotor", {})
+        affective = details.get("affective", {})
+        skills_rows = "".join(
+            "<tr>"
+            f"<td>{escape(skill)}</td><td>{escape(psychomotor.get(skill) or '—')}</td>"
+            f"<td>{escape(trait)}</td><td>{escape(affective.get(trait) or '—')}</td>"
+            "</tr>"
+            for skill, trait in zip(db.PSYCHOMOTOR_SKILLS, db.AFFECTIVE_TRAITS)
+        )
+        skills_html = (
+            "<table class='skills'><thead><tr><th colspan='2'>PSYCHOMOTOR SKILLS</th>"
+            "<th colspan='2'>AFFECTIVE TRAITS</th></tr></thead><tbody>"
+            + skills_rows + "</tbody></table>"
+        )
+        comments_html = (
+            "<div class='comments'><b>TEACHER'S REMARK:</b><br>"
+            + escape(details.get("teacher_remark") or "—")
+            + "<br><b>PRINCIPAL'S REMARK:</b><br>"
+            + escape(details.get("principal_remark") or "—")
+            + "</div>"
+        )
+        term_dates = GradeEntryPage._term_dates_html(settings)
         html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
-          body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; margin:0; }}
-          p {{ margin:1px 0; }}
-          h1 {{ color: #102a43; font-size:{max(font_size + 4, 8)}pt; margin:1px 0; }}
-          table {{ border-collapse: collapse; width: 100%; }}
-          table.info td {{ border:0; padding:1px; }}
-          table.grades th {{ background: #e8f0f6; text-align: left; }}
-          table.grades th, table.grades td {{ border: 1px solid #9fb3c8; padding: {pad}px; }}
+          body {{ font-family: Arial, sans-serif; color:#183247; font-size:{font_size}pt; margin:0; }}
+          p {{ margin:1px 0; }} table {{ border-collapse:collapse; width:100%; }}
+          .identity td {{ border:0; vertical-align:middle; padding:1px 4px; }}
+          .school-name {{ color:#244bb5; font-weight:bold; font-size:{max(font_size + 4, 10)}pt; text-align:center; }}
+          .school-contact {{ text-align:center; color:#486581; font-size:{max(font_size - 1, 5)}pt; }}
+          .banner {{ margin:2px 0 4px; padding:4px; color:white; background:#244bb5; text-align:center; font-weight:bold; }}
+          table.info td {{ border:1px solid #bdd8ec; background:#f0f8fc; padding:3px 5px; }}
+          table.grades th {{ background:#244bb5; color:white; text-align:center; }}
+          table.grades th, table.grades td {{ border:1px solid #bdd8ec; padding:{pad}px 3px; }}
           table.grades {{ table-layout:fixed; font-size:{font_size}pt; }}
-          table.grades th, table.grades td {{ line-height:80%; }}
-          table.grades th:nth-child(1), table.grades td:nth-child(1) {{ width:48%; white-space:nowrap; }}
-          table.grades th:nth-child(2), table.grades td:nth-child(2) {{ width:20%; }}
-          table.grades th:nth-child(3), table.grades td:nth-child(3) {{ width:18%; }}
-          table.grades th:nth-child(4), table.grades td:nth-child(4) {{ width:14%; }}
-          .summary {{ margin:2px 0 1px; font-size:{max(font_size, 5)}pt; }} .key {{ margin:1px 0; font-size:{max(font_size - 1, 4)}pt; color:#486581; }}
-          .approval {{ margin-top: 1px; color: #486581; font-size:{max(font_size - 1, 4)}pt; }}
-          .school {{ text-align:center; margin-bottom:2px; }} .school h2 {{ margin:0; color:#102a43; font-size:{max(font_size + 2, 7)}pt; }}
-          .signatures {{ width:100%; margin-top:1px; }} .signatures td {{ width:50%; border:0; padding:1px 10px; }}
+          table.grades tr:nth-child(even) {{ background:#f0f8fc; }}
+          .serial {{ text-align:center; }} .compact-subject {{ width:50%; }} .detail {{ font-size:{max(font_size - 1, 5)}pt; color:#40566b; }}
+          table.summary {{ margin:3px 0; color:#183247; background:#eaf3fa; border-collapse:collapse; width:100%; }}
+          table.summary td {{ width:25%; text-align:center; color:#183247; background:#eaf3fa; border:1px solid #bdd8ec; padding:3px; }}
+          .key {{ margin:2px 0; text-align:center; color:#486581; font-size:{max(font_size - 1, 4)}pt; }}
+          table.skills {{ margin-top:2px; font-size:{max(font_size - 1, 5)}pt; }}
+          table.skills th {{ color:white; background:#526477; text-align:center; }}
+          table.skills td {{ border:1px solid #c8d3df; padding:1px 3px; }}
+          .attendance {{ border-top:1px solid #244bb5; border-bottom:1px solid #244bb5; padding:3px 1px; }}
+          .comments {{ border-top:1px solid #244bb5; border-bottom:1px solid #244bb5; margin-top:2px; padding:2px; }}
+          .dates {{ margin:2px 0; font-size:{max(font_size - 1, 5)}pt; font-weight:bold; }}
+          .approval {{ margin-top:1px; color:#486581; font-size:{max(font_size - 1, 4)}pt; }}
+          .signatures {{ width:100%; margin-top:1px; }} .signatures td {{ width:50%; border:0; padding:1px 10px; text-align:center; }}
           .signline {{ border-top:1px solid #486581; padding-top:1px; margin-top:1px; }}
         </style></head><body>
-          {GradeEntryPage._school_identity_html(profile, bool(logo_data))}
-          <h1>Student Report Card</h1>
-          <table class="info"><tr><td><b>{name}</b> &nbsp; Admission No.: {escape(student['admission_no'])}<br>
-          Class: {escape(data['class_name'])} {escape(data['section'])}{stage}<br>
-          Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}{term_dates}</td>{photo}</tr></table>
-          <table class="grades"><thead><tr>{'<th colspan="2">Subject results</th>' if compact_subject_grid else f'<th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th>{remark_header}'}</tr></thead>
+          <table class="identity"><tr><td width="80">{logo}</td><td><div class="school-name">{school_name}</div><div class="school-contact">{school_contact}</div></td></tr></table>
+          <div class="banner">STUDENT ACADEMIC REPORT CARD</div>
+          <table class="info"><tr><td><b>NAME:</b> {name}</td><td><b>STUDENT ID:</b> {escape(student['admission_no'])}</td>{photo}</tr>
+          <tr><td><b>GENDER:</b> {gender}</td><td><b>CLASS:</b> {escape(data['class_name'])} {escape(data['section'])}{stage}</td>{'<td></td>' if photo_data else ''}</tr>
+          <tr><td><b>SESSION:</b> {escape(data['academic_session'])}</td><td><b>TERM:</b> {data['term_order']}. {escape(data['term_name'])}</td>{'<td></td>' if photo_data else ''}</tr>
+          {position_row}</table>
+          <table class="grades"><thead><tr>{column_header}</tr></thead>
           <tbody>{rows}</tbody></table>
-          {summary}{key_html}
-          <div class="approval">Approved result card. Grades use the school's saved grading scale.{position_note}</div>
+          {summary}{skills_html}{key_html}{comments_html}{attendance_html}
+          <div class="dates">{term_dates.replace('<br>', ' &nbsp;·&nbsp; ') if term_dates else ''}</div>
+          <div class="approval">Approved result. Grade thresholds use the school's saved grading scale; class position uses the average of subject percentages.</div>
           {GradeEntryPage._card_signature_html(profile, settings, pad)}
         </body></html>"""
         return html
@@ -1073,10 +1290,27 @@ class GradeEntryPage(QWidget):
         painter = QPainter(writer)
         pdf_scale = writer.resolution() / 72.0
         painter.scale(pdf_scale, pdf_scale)
+        application = QApplication.instance()
+        application_font = application.font() if application is not None else None
+        font_family = "Arial"
+        if font_family not in QFontDatabase.families():
+            font_folder = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+            candidate = font_folder / "arial.ttf"
+            if candidate.is_file():
+                font_id = QFontDatabase.addApplicationFont(str(candidate))
+                families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+                if families:
+                    font_family = families[0]
+                    # Registering the Windows font makes PDF glyphs render in sparse
+                    # environments; restore the desktop UI font so global widget
+                    # metrics and layout do not change after a report export.
+                    if application is not None and application_font is not None:
+                        application.setFont(application_font)
         for index, card in enumerate(cards):
             if index:
                 writer.newPage()
             document = QTextDocument()
+            document.setDefaultFont(QFont(font_family, 9))
             document.setPageSize(page_size)
             settings = card.get("report_settings", {})
             sources = {

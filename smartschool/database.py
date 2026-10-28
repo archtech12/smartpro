@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -44,6 +44,9 @@ MODULES = {
 }
 
 EDUCATIONAL_STAGES = {"primary": "Primary", "secondary": "Secondary"}
+REPORT_CARD_RATINGS = ("Excellent", "Very Good", "Good", "Fair", "Needs Improvement")
+PSYCHOMOTOR_SKILLS = ("Handwriting", "Verbal Fluency", "Games & Sports", "Drawing & Painting", "Musical Skills")
+AFFECTIVE_TRAITS = ("Punctuality", "Attendance", "Neatness", "Honesty", "Politeness")
 
 
 def connect() -> sqlite3.Connection:
@@ -879,6 +882,28 @@ def _migration_29(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 29")
 
 
+def _migration_30(conn: sqlite3.Connection) -> None:
+    """Store per-student report-card skill ratings and term remarks."""
+    conn.execute(
+        """CREATE TABLE report_card_details (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            enrollment_id INTEGER NOT NULL REFERENCES student_enrollments(id) ON DELETE RESTRICT,
+            term_id INTEGER NOT NULL REFERENCES terms(id) ON DELETE RESTRICT,
+            psychomotor_json TEXT NOT NULL DEFAULT '{}',
+            affective_json TEXT NOT NULL DEFAULT '{}',
+            teacher_remark TEXT NOT NULL DEFAULT '' CHECK(length(teacher_remark)<=500),
+            principal_remark TEXT NOT NULL DEFAULT '' CHECK(length(principal_remark)<=500),
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(enrollment_id,term_id)
+        )"""
+    )
+    conn.execute("CREATE INDEX idx_report_card_details_term ON report_card_details(term_id,enrollment_id)")
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(30)")
+    conn.execute("PRAGMA user_version = 30")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -949,6 +974,8 @@ def initialize() -> None:
                 _migration_28(conn)
             elif next_version == 29:
                 _migration_29(conn)
+            elif next_version == 30:
+                _migration_30(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()
@@ -2710,6 +2737,7 @@ def approve_assessment_results(snapshot_id: int, actor: str) -> tuple[str, str]:
 def load_report_card_data(
     academic_session_id: int, class_id: int, term_id: int, enrollment_id: int,
     class_positions: dict[int, dict] | None = None,
+    subject_cache: dict[int, dict] | None = None,
 ) -> dict:
     """Load an individual report card only when every class subject is approved and complete.
 
@@ -2726,7 +2754,7 @@ def load_report_card_data(
             (academic_session_id, class_id),
         ).fetchall()
         term = conn.execute(
-            "SELECT academic_session_id,term_name,term_order FROM terms WHERE id=?", (term_id,)
+            "SELECT academic_session_id,term_name,term_order,starts_on,ends_on FROM terms WHERE id=?", (term_id,)
         ).fetchone()
         session = conn.execute(
             "SELECT name FROM academic_sessions WHERE id=?", (academic_session_id,)
@@ -2739,7 +2767,7 @@ def load_report_card_data(
         if not assignment_rows:
             raise ValueError("No class subjects are assigned for this academic session.")
         enrollment = conn.execute(
-            """SELECT e.id,s.admission_no,s.first_name,s.last_name,s.photo_data
+            """SELECT e.id,s.admission_no,s.first_name,s.last_name,s.gender,s.photo_data
                FROM student_enrollments e JOIN students s ON s.id=e.student_id
                WHERE e.id=? AND e.academic_session_id=? AND e.class_id=?""",
             (enrollment_id, academic_session_id, class_id),
@@ -2749,7 +2777,8 @@ def load_report_card_data(
         subject_results = []
         subject_bands = []
         for assignment in assignment_rows:
-            snapshot = conn.execute(
+            cached_subject = (subject_cache or {}).get(int(assignment["id"]))
+            snapshot = cached_subject.get("snapshot") if cached_subject else conn.execute(
                 """SELECT p.id,p.policy_json,a.approved_by,a.approved_at
                    FROM assessment_policy_snapshots p
                    LEFT JOIN assessment_result_approvals a ON a.snapshot_id=p.id
@@ -2761,22 +2790,55 @@ def load_report_card_data(
             policy = json.loads(snapshot["policy_json"])
             if enrollment_id not in [int(value) for value in policy.get("roster_enrollment_ids", [])]:
                 raise ValueError(f"{assignment['subject_name']} has no result for this student.")
-            scores = {
-                int(row["component_id"]): row["score_text"]
+            all_scores = cached_subject.get("scores") if cached_subject else None
+            if all_scores is None:
+                all_scores = {}
                 for row in conn.execute(
-                    "SELECT component_id,score_text FROM assessment_scores WHERE snapshot_id=? AND enrollment_id=?",
-                    (snapshot["id"], enrollment_id),
-                )
-            }
+                    "SELECT enrollment_id,component_id,score_text FROM assessment_scores WHERE snapshot_id=?",
+                    (snapshot["id"],),
+                ):
+                    all_scores.setdefault(int(row["enrollment_id"]), {})[int(row["component_id"])] = row["score_text"]
+            scores = all_scores.get(int(enrollment_id), {})
             result = calculate_assessment_result(policy["components"], scores, policy["bands"])
             if not result["complete"]:
                 raise ValueError(f"{assignment['subject_name']} result is incomplete and cannot be reported.")
+            subject_positions = cached_subject.get("positions") if cached_subject else None
+            if subject_positions is None:
+                subject_averages = {}
+                for roster_id in policy.get("roster_enrollment_ids", []):
+                    roster_result = calculate_assessment_result(
+                        policy["components"], all_scores.get(int(roster_id), {}), policy["bands"]
+                    )
+                    if roster_result["complete"]:
+                        subject_averages[int(roster_id)] = _overall_average_fraction([roster_result])
+                subject_positions = calculate_class_positions(subject_averages) if subject_averages else {}
+            result["components"] = [
+                {
+                    "name": component["component_name"],
+                    "score": scores.get(int(component["id"])),
+                    "maximum": str(component["max_score"]),
+                    "order": int(component["component_order"]),
+                }
+                for component in policy["components"]
+            ]
             subject_bands.append(policy["bands"])
             subject_results.append({
+                "assignment_id": int(assignment["id"]),
                 "subject_code": assignment["subject_code"],
                 "subject_name": assignment["subject_name"],
+                "position": subject_positions.get(int(enrollment_id)),
                 **result,
             })
+        attendance = conn.execute(
+            """SELECT COUNT(DISTINCT r.id) AS school_opened,
+                      SUM(CASE WHEN m.status='present' THEN 1 ELSE 0 END) AS present,
+                      SUM(CASE WHEN m.status='absent' THEN 1 ELSE 0 END) AS absent
+               FROM attendance_registers r
+               LEFT JOIN attendance_marks m ON m.register_id=r.id AND m.enrollment_id=?
+               WHERE r.academic_session_id=? AND r.class_id=?
+                 AND r.attendance_date BETWEEN ? AND ?""",
+            (int(enrollment_id), academic_session_id, class_id, term["starts_on"], term["ends_on"]),
+        ).fetchone()
         card = {
             "student": dict(enrollment),
             "academic_session": session["name"],
@@ -2785,6 +2847,11 @@ def load_report_card_data(
             "class_name": class_row["class_name"],
             "section": class_row["section"],
             "subjects": subject_results,
+            "attendance": {
+                "school_opened": int(attendance["school_opened"] or 0),
+                "present": int(attendance["present"] or 0),
+                "absent": int(attendance["absent"] or 0),
+            },
             "overall": calculate_overall_average(subject_results, _common_grade_bands(subject_bands)),
             "approval_status": "Approved",
             "educational_stage": EDUCATIONAL_STAGES.get(class_row["educational_stage"], ""),
@@ -2793,6 +2860,7 @@ def load_report_card_data(
             "school_profile": _school_profile_in_transaction(conn),
             "school_logo": _school_logo_in_transaction(conn),
         }
+        card["report_card_details"] = _report_card_details_in_transaction(conn, int(enrollment_id), int(term_id))
     if class_positions is None:
         try:
             master = load_master_sheet_data(academic_session_id, class_id, term_id)
@@ -2803,13 +2871,132 @@ def load_report_card_data(
     return card
 
 
+def _report_card_details_in_transaction(conn, enrollment_id: int, term_id: int) -> dict:
+    row = conn.execute(
+        """SELECT psychomotor_json,affective_json,teacher_remark,principal_remark
+           FROM report_card_details WHERE enrollment_id=? AND term_id=?""",
+        (enrollment_id, term_id),
+    ).fetchone()
+    if row is None:
+        return {"psychomotor": {}, "affective": {}, "teacher_remark": "", "principal_remark": ""}
+    return {
+        "psychomotor": json.loads(row["psychomotor_json"]),
+        "affective": json.loads(row["affective_json"]),
+        "teacher_remark": row["teacher_remark"],
+        "principal_remark": row["principal_remark"],
+    }
+
+
+def load_report_card_details(enrollment_id: int, term_id: int, actor: str | None = None) -> dict:
+    with connection() as conn:
+        if actor is not None:
+            _require_admin(conn, actor)
+        row = conn.execute(
+            """SELECT e.academic_session_id,t.academic_session_id AS term_session
+               FROM student_enrollments e JOIN terms t ON t.id=? WHERE e.id=?""",
+            (term_id, enrollment_id),
+        ).fetchone()
+        if row is None or row["academic_session_id"] != row["term_session"]:
+            raise ValueError("Select a student enrollment and academic term from the same session.")
+        return _report_card_details_in_transaction(conn, enrollment_id, term_id)
+
+
+def save_report_card_details(
+    enrollment_id: int,
+    term_id: int,
+    psychomotor: dict[str, str],
+    affective: dict[str, str],
+    teacher_remark: str,
+    principal_remark: str,
+    actor: str,
+) -> None:
+    if not isinstance(teacher_remark, str) or len(teacher_remark.strip()) > 500:
+        raise ValueError("Teacher remark must be text with no more than 500 characters.")
+    if not isinstance(principal_remark, str) or len(principal_remark.strip()) > 500:
+        raise ValueError("Principal remark must be text with no more than 500 characters.")
+    validated = {}
+    for label, values, allowed_items in (
+        ("Psychomotor", psychomotor, PSYCHOMOTOR_SKILLS),
+        ("Affective", affective, AFFECTIVE_TRAITS),
+    ):
+        if not isinstance(values, dict) or set(values) - set(allowed_items):
+            raise ValueError(f"{label} ratings contain an unsupported item.")
+        normalized = {}
+        for item, rating in values.items():
+            if not isinstance(rating, str) or rating not in REPORT_CARD_RATINGS and rating != "":
+                raise ValueError(f"Choose a valid {label.lower()} rating.")
+            if rating:
+                normalized[item] = rating
+        validated[label] = normalized
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = _require_admin(conn, actor)
+        enrollment = conn.execute(
+            """SELECT e.academic_session_id,t.academic_session_id AS term_session
+               FROM student_enrollments e JOIN terms t ON t.id=? WHERE e.id=?""",
+            (term_id, enrollment_id),
+        ).fetchone()
+        if enrollment is None or enrollment["academic_session_id"] != enrollment["term_session"]:
+            raise ValueError("Select a student enrollment and academic term from the same session.")
+        conn.execute(
+            """INSERT INTO report_card_details
+               (enrollment_id,term_id,psychomotor_json,affective_json,teacher_remark,principal_remark,updated_by)
+               VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(enrollment_id,term_id) DO UPDATE SET
+                 psychomotor_json=excluded.psychomotor_json,affective_json=excluded.affective_json,
+                 teacher_remark=excluded.teacher_remark,principal_remark=excluded.principal_remark,
+                 updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP""",
+            (enrollment_id, term_id, json.dumps(validated["Psychomotor"], ensure_ascii=False, sort_keys=True),
+             json.dumps(validated["Affective"], ensure_ascii=False, sort_keys=True),
+             teacher_remark.strip(), principal_remark.strip(), actor),
+        )
+        row_id = int(conn.execute(
+            "SELECT id FROM report_card_details WHERE enrollment_id=? AND term_id=?",
+            (enrollment_id, term_id),
+        ).fetchone()[0])
+        _audit_in_transaction(conn, actor, "SAVE", "report_card_details", row_id)
+
+
 def load_class_report_cards_data(academic_session_id: int, class_id: int, term_id: int) -> dict:
     """Load approved individual report cards for one class, requiring a consistent frozen roster."""
     master = load_master_sheet_data(academic_session_id, class_id, term_id)
     positions = {int(student["enrollment_id"]): student["position"] for student in master["students"]}
+    subject_cache = {}
+    with connection() as conn:
+        for subject in master["subjects"]:
+            assignment_id = int(subject["id"])
+            snapshot = conn.execute(
+                """SELECT p.id,p.policy_json,a.approved_by,a.approved_at
+                   FROM assessment_policy_snapshots p
+                   LEFT JOIN assessment_result_approvals a ON a.snapshot_id=p.id
+                   WHERE p.class_subject_assignment_id=? AND p.term_id=?""",
+                (assignment_id, term_id),
+            ).fetchone()
+            if snapshot is None or snapshot["approved_by"] is None:
+                raise ValueError(f"{subject['subject_name']} results are not approved yet.")
+            policy = json.loads(snapshot["policy_json"])
+            scores = {}
+            for row in conn.execute(
+                "SELECT enrollment_id,component_id,score_text FROM assessment_scores WHERE snapshot_id=?",
+                (snapshot["id"],),
+            ):
+                scores.setdefault(int(row["enrollment_id"]), {})[int(row["component_id"])] = row["score_text"]
+            exact_averages = {}
+            for roster_id in policy.get("roster_enrollment_ids", []):
+                result = calculate_assessment_result(
+                    policy["components"], scores.get(int(roster_id), {}), policy["bands"]
+                )
+                if result["complete"]:
+                    exact_averages[int(roster_id)] = _overall_average_fraction([result])
+            subject_cache[assignment_id] = {
+                "snapshot": snapshot,
+                "scores": scores,
+                "positions": calculate_class_positions(exact_averages) if exact_averages else {},
+            }
     cards = [
         load_report_card_data(
-            academic_session_id, class_id, term_id, int(student["enrollment_id"]), class_positions=positions
+            academic_session_id, class_id, term_id, int(student["enrollment_id"]),
+            class_positions=positions, subject_cache=subject_cache,
         )
         for student in master["students"]
     ]

@@ -30,7 +30,7 @@ def configure_table_headers(table):
         label = item.text()
         item.setToolTip(label)
         desired = metrics.horizontalAdvance(label) + 28
-        if label.casefold() == "student":
+        if label.casefold() in {"student", "student name"}:
             desired = max(desired, 150)
         elif label.casefold() in {"admission no.", "admission number"}:
             desired = max(desired, 130)

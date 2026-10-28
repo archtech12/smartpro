@@ -414,15 +414,25 @@ def test_report_card_requires_approved_complete_results(grade_entry_db):
         {ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"}}, "admin",
     )
     db.approve_assessment_results(snapshot_id, "admin")
+    db.save_attendance_marks(
+        ids["session"], ids["class"], "2026-09-15", {ids["enrollment"]: "present"}, "admin"
+    )
     report = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
     assert report["approval_status"] == "Approved"
     assert report["school_profile"]["school_name"] == "Synthetic School"
     assert report["student"]["admission_no"] == "S-501"
     assert report["subjects"] == [{
+        "assignment_id": ids["assignment"],
         "subject_code": "ENG", "subject_name": "English", "complete": True,
         "points_earned": "80", "points_possible": "100", "percentage": "80",
         "display_percentage": "80.00", "grade_label": "P", "remark": "Pass",
+        "position": {"position": 1, "of": 1, "position_text": "1st", "tied": False},
+        "components": [
+            {"name": "Coursework", "score": "30", "maximum": "40", "order": 1},
+            {"name": "Examination", "score": "50", "maximum": "60", "order": 2},
+        ],
     }]
+    assert report["attendance"] == {"school_opened": 1, "present": 1, "absent": 0}
 
 
 def test_student_profile_loads_history_and_is_admin_only(grade_entry_db):
@@ -825,6 +835,7 @@ def test_master_sheet_and_report_cards_rank_with_ties_and_average_grade(grade_en
     assert card["position"]["position_text"] == "3rd" and card["position"]["of"] == 3
     assert card["overall"]["grade_label"] == "F"
     assert [item["grade_label"] for item in card["subjects"]] == ["F", "F"]  # subject grades unchanged
+    assert [item["position"]["position_text"] for item in card["subjects"]] == ["3rd", "3rd"]
     cards = db.load_class_report_cards_data(ids["session"], ids["class"], ids["term"])["report_cards"]
     assert {c["student"]["admission_no"]: c["position"]["position"] for c in cards} == {
         "S-501": 1, "S-502": 1, "S-503": 3,
@@ -888,6 +899,54 @@ def test_report_card_data_carries_stage_key_style_and_signatures(grade_entry_db)
     assert card["report_settings"]["head_signature"] == png
 
 
+def test_report_card_details_are_admin_managed_and_printed(grade_entry_db):
+    ids = grade_entry_db
+    db.save_report_card_details(
+        ids["enrollment"], ids["term"],
+        {"Handwriting": "Good", "Games & Sports": "Very Good"},
+        {"Punctuality": "Excellent"},
+        "Completes classwork consistently.", "Encouraged to keep improving.", "admin",
+    )
+    details = db.load_report_card_details(ids["enrollment"], ids["term"], "admin")
+    assert details["psychomotor"] == {"Handwriting": "Good", "Games & Sports": "Very Good"}
+    assert details["affective"] == {"Punctuality": "Excellent"}
+    assert details["teacher_remark"] == "Completes classwork consistently."
+    with pytest.raises(PermissionError):
+        db.save_report_card_details(ids["enrollment"], ids["term"], {}, {}, "", "", "teacher")
+    with pytest.raises(ValueError, match="valid psychomotor rating"):
+        db.save_report_card_details(ids["enrollment"], ids["term"], {"Handwriting": "Outstanding"}, {}, "", "", "admin")
+
+    snapshot, _ = db.save_assessment_scores(ids["assignment"], ids["term"], {
+        ids["enrollment"]: {ids["components"][0]: "30", ids["components"][1]: "50"},
+    }, "admin")
+    db.approve_assessment_results(snapshot, "admin")
+    card = db.load_report_card_data(ids["session"], ids["class"], ids["term"], ids["enrollment"])
+    assert card["report_card_details"] == details
+    from smartschool.assessment_ui import GradeEntryPage
+    html = GradeEntryPage._report_card_html(card)
+    assert "PSYCHOMOTOR SKILLS" in html and "AFFECTIVE TRAITS" in html
+    assert "Completes classwork consistently." in html and "Encouraged to keep improving." in html
+
+
+def test_report_card_details_dialog_collects_optional_ratings_and_remarks(monkeypatch):
+    pytest.importorskip("PyQt6")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from smartschool.assessment_ui import ReportCardDetailsDialog
+
+    app = QApplication.instance() or QApplication([])
+    dialog = ReportCardDetailsDialog({})
+    dialog.psychomotor["Handwriting"].setCurrentIndex(1)  # Excellent
+    dialog.affective["Punctuality"].setCurrentIndex(2)  # Very Good
+    dialog.teacher_remark.setPlainText("Keep up the effort.")
+    psychomotor, affective, teacher, principal = dialog.values()
+    assert psychomotor["Handwriting"] == "Excellent"
+    assert affective["Punctuality"] == "Very Good"
+    assert teacher == "Keep up the effort." and principal == ""
+    dialog.close()
+    app.processEvents()
+
+
 def _approved_card(ids, people):
     db.approve_assessment_results(people["science_snapshot"], "admin")
     return db.load_report_card_data(ids["session"], ids["class"], ids["term"], people["learner"])
@@ -901,15 +960,16 @@ def test_report_card_html_follows_the_ranking_style_and_shows_stage_and_key(grad
     people = _two_subject_class(ids)
     card = _approved_card(ids, people)
     position_html = GradeEntryPage._report_card_html(card)
-    assert "Overall average:</b> 65.00% across 2 subjects" in position_html
-    assert "Class position:</b> 1st of 3 (tied)" in position_html and "Average grade" not in position_html
-    assert "Class: Grade 5 A · Primary" in position_html
+    assert "AVERAGE</b><br>65.00%" in position_html
+    assert "1st of 3 (tied)" in position_html and "AVERAGE GRADE" not in position_html
+    assert "<b>CLASS:</b> Grade 5 A · Primary" in position_html
     assert "Grading key:</b> P 50+ (Pass) &nbsp; F 0+ (Needs support)" in position_html
-    assert "Class position ranks the unrounded overall average" in position_html
+    assert "TOTAL SCORE" in position_html and "PERFORMANCE RESULT" in position_html
+    assert "CA: 30/40" in position_html and "EXAM: 50/60" in position_html
     card["report_settings"] = {**card["report_settings"], "ranking_style": "average_grade"}
     grade_html = GradeEntryPage._report_card_html(card)
-    assert "Average grade:</b> P (Pass)" in grade_html
-    assert "Class position" not in grade_html and "ranks the unrounded" not in grade_html
+    assert "<b>AVERAGE GRADE</b>" in grade_html
+    assert "CLASS POSITION" not in grade_html
 
 
 def test_report_card_html_omits_position_when_class_cannot_be_ranked_and_marks_signatures(grade_entry_db):
@@ -924,7 +984,7 @@ def test_report_card_html_omits_position_when_class_cannot_be_ranked_and_marks_s
     db_profile = {**card["school_profile"], "head_name": "A. Head", "head_title": "Principal"}
     card["school_profile"] = db_profile
     html = GradeEntryPage._report_card_html(card)
-    assert "Class position" not in html and "Overall average:</b> 65.00%" in html
+    assert "CLASS POSITION" not in html and "65.00%" in html
     assert "<img src='teacher-signature'>" in html and "<img src='head-signature'>" in html
     assert "A. Head Principal" in html and "Class teacher</div>" in html  # a signature without a typed name gets a label
 
@@ -944,8 +1004,8 @@ def test_report_card_layout_steps_shrink_and_drop_the_remark_column_last(grade_e
     assert [remark for *_rest, remark in steps] == [True, True, True, False, False, False]
     roomy = GradeEntryPage._report_card_html(card, *steps[0])
     tight = GradeEntryPage._report_card_html(card, *steps[-1])
-    assert "<th>Remark</th>" in roomy and "<th>Remark</th>" not in tight
-    assert "padding: 1px" in tight and "padding: 4px" in roomy
+    assert "<th>REMARK</th>" in roomy and "<th>REMARK</th>" not in tight
+    assert "padding:1px 3px" in tight and "padding:4px 3px" in roomy
 
 
 def _class_with_many_subjects(ids, subject_count):
