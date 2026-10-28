@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -769,6 +769,96 @@ def _migration_26(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 26")
 
 
+def _migration_27(conn: sqlite3.Connection) -> None:
+    """Email delivery: SMTP settings, send retries, report-card attachments and the credit ledger.
+
+    The v25 communication tables only allowed a few statuses, kinds and setting keys, and SQLite
+    cannot relax a CHECK in place, so they are rebuilt (copying every row). ``initialize`` has
+    already made a verified backup of the database before this runs.
+    """
+    conn.execute("ALTER TABLE communication_messages RENAME TO communication_messages_v25")
+    conn.execute("ALTER TABLE communication_templates RENAME TO communication_templates_v25")
+    conn.execute("ALTER TABLE communication_settings RENAME TO communication_settings_v25")
+    for index in ("idx_comm_messages_dedupe", "idx_comm_messages_status"):
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
+    conn.execute(
+        """CREATE TABLE communication_templates(
+            kind TEXT PRIMARY KEY CHECK(kind IN ('birthday','fee_reminder','welcome','notice','report_card')),
+            subject TEXT NOT NULL CHECK(length(subject) BETWEEN 1 AND 200),
+            body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 4000),
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        """INSERT INTO communication_templates(kind,subject,body,updated_by,updated_at)
+           SELECT kind,subject,body,updated_by,updated_at FROM communication_templates_v25"""
+    )
+    conn.execute(
+        """CREATE TABLE communication_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK(kind IN ('birthday','fee_reminder','welcome','notice','report_card')),
+            channel TEXT NOT NULL CHECK(channel IN ('email','whatsapp')),
+            student_id INTEGER REFERENCES students(id),
+            recipient_name TEXT NOT NULL,
+            recipient_contact TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','cancelled','failed')),
+            dedupe_key TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            handled_by TEXT,
+            handled_at TEXT,
+            attachment_path TEXT CHECK(attachment_path IS NULL OR length(attachment_path)<=500),
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count>=0),
+            last_error TEXT CHECK(last_error IS NULL OR length(last_error)<=300),
+            last_attempt_at TEXT,
+            credit_cost INTEGER NOT NULL DEFAULT 0 CHECK(credit_cost>=0))"""
+    )
+    conn.execute(
+        """INSERT INTO communication_messages(id,kind,channel,student_id,recipient_name,recipient_contact,subject,body,
+                                              status,dedupe_key,created_by,created_at,handled_by,handled_at)
+           SELECT id,kind,channel,student_id,recipient_name,recipient_contact,subject,body,
+                  status,dedupe_key,created_by,created_at,handled_by,handled_at FROM communication_messages_v25"""
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_comm_messages_dedupe ON communication_messages(dedupe_key) "
+        "WHERE dedupe_key IS NOT NULL AND status IN ('pending','sent','failed')"
+    )
+    conn.execute("CREATE INDEX idx_comm_messages_status ON communication_messages(status,created_at)")
+    conn.execute(
+        """CREATE TABLE communication_settings(
+            key TEXT PRIMARY KEY CHECK(key IN ('country_code','smtp_host','smtp_port','smtp_security','smtp_username',
+                'sender_email','sender_name','smtp_password','daily_limit','delay_seconds','max_retries','license_id')),
+            value TEXT NOT NULL CHECK(length(value)<=300),
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        "INSERT INTO communication_settings(key,value,updated_by,updated_at) "
+        "SELECT key,value,updated_by,updated_at FROM communication_settings_v25"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS communication_credits(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_type TEXT NOT NULL CHECK(entry_type IN ('topup','deduction')),
+            amount INTEGER NOT NULL CHECK(amount<>0),
+            description TEXT NOT NULL CHECK(length(description)<=200),
+            reference TEXT CHECK(reference IS NULL OR length(reference)<=60),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK((entry_type='topup' AND amount>0) OR (entry_type='deduction' AND amount<0)))"""
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_credits_topup_reference ON communication_credits(reference) "
+        "WHERE entry_type='topup' AND reference IS NOT NULL"
+    )
+    for table in ("communication_messages_v25", "communication_templates_v25", "communication_settings_v25"):
+        conn.execute(f"DROP TABLE {table}")
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(27)")
+    conn.execute("PRAGMA user_version = 27")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -833,6 +923,8 @@ def initialize() -> None:
                 _migration_25(conn)
             elif next_version == 26:
                 _migration_26(conn)
+            elif next_version == 27:
+                _migration_27(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()

@@ -348,7 +348,7 @@ class HistoryTab(_Tab):
         filters = QHBoxLayout()
         self.status = QComboBox()
         self.status.addItem("Every status", None)
-        for key in ("pending", "sent", "cancelled"):
+        for key in ("pending", "sent", "cancelled", "failed"):
             self.status.addItem(key.capitalize(), key)
         self.kind = QComboBox()
         self.kind.addItem("Every type", None)
