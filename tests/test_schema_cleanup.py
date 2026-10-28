@@ -12,6 +12,31 @@ def test_fresh_schema_does_not_install_question_bank(tmp_path, monkeypatch):
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='question_bank_items'"
         ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name LIKE 'cbt_%'"
+        ).fetchone() is None
+
+
+def test_v28_upgrade_drops_deferred_cbt_tables_and_adds_student_prefix(tmp_path, monkeypatch):
+    database_path = tmp_path / "school.db"
+    monkeypatch.setattr(db, "APP_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", database_path)
+    db.initialize()
+    with db.connection() as conn:
+        conn.execute("ALTER TABLE school_profile DROP COLUMN admission_id_prefix")
+        conn.execute("DELETE FROM schema_migrations WHERE version=29")
+        conn.execute("CREATE TABLE cbt_questions(id INTEGER PRIMARY KEY, prompt TEXT)")
+        conn.execute("INSERT INTO cbt_questions(prompt) VALUES('synthetic legacy record')")
+        conn.execute("PRAGMA user_version=28")
+
+    db.initialize()
+
+    with db.connection() as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 29
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name LIKE 'cbt_%'"
+        ).fetchone() is None
+    assert db.load_school_profile()["admission_id_prefix"] == "ADM"
 
 
 def test_v20_upgrade_removes_question_bank_and_adds_optional_student_details(tmp_path, monkeypatch):

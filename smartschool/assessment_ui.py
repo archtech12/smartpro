@@ -5,10 +5,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from html import escape
-from math import ceil
 
-from PyQt6.QtCore import QMarginsF, QRectF, QThreadPool, Qt, QUrl
-from PyQt6.QtGui import QAction, QColor, QFont, QFontMetricsF, QImage, QPageLayout, QPageSize, QPdfWriter, QPainter, QPen, QTextDocument
+from PyQt6.QtCore import QMarginsF, QThreadPool, Qt, QUrl
+from PyQt6.QtGui import QAction, QImage, QPageLayout, QPageSize, QPdfWriter, QPainter, QTextDocument
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -30,6 +29,7 @@ from PyQt6.QtWidgets import (
 from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
 from . import database as db
+from . import tabular
 from .score_import import preview_score_import, write_score_template
 from .workers import BackgroundTask
 
@@ -105,9 +105,9 @@ class GradeEntryPage(QWidget):
         self.save_button.setObjectName("primary")
         self.save_button.setToolTip("Save all entered scores for this class and subject.")
         self.template_button = QAction("Export Excel template", self)
-        self.template_button.setToolTip("Export the roster, student IDs, and score columns to an Excel workbook for editing.")
+        self.template_button.setToolTip("Export the roster and score columns as an Excel template for editing.")
         self.import_button = QPushButton("Import Scores")
-        self.import_button.setToolTip("Load a CSV or Excel score sheet and review values before saving.")
+        self.import_button.setToolTip("Load an Excel or CSV score sheet and review imported values before saving.")
         self.approve_button = QAction("Approve and lock results", self)
         self.correct_button = QAction("Correct approved results", self)
         self.more_button = QToolButton()
@@ -525,13 +525,13 @@ class GradeEntryPage(QWidget):
     def export_score_template(self):
         if not self.template_button.isEnabled():
             return
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Export score template", "grade_scores_template.xlsx", "Excel workbook (*.xlsx);;CSV file (*.csv)"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export score template", "grade_scores_template.xlsx", "Excel workbook (*.xlsx);;CSV files (*.csv)"
         )
         if not path:
             return
         if not path.casefold().endswith((".csv", ".xlsx")):
-            path += ".xlsx" if "excel" in selected_filter.casefold() else ".csv"
+            path += ".xlsx"
         students = []
         for row_index, student in enumerate(self._students):
             scores = {}
@@ -547,14 +547,15 @@ class GradeEntryPage(QWidget):
         self.status.setText(f"Score template saved: {path}")
         QMessageBox.information(
             self, "Score template ready",
-            "Fill CA and exam score columns, then import this workbook. Admission number identifies each student; name is for reference.",
+            "Fill in the score columns and import the file. Admission number identifies each student. "
+            "The student name columns are for reference only.",
         )
 
     def import_score_csv(self):
         if not self.import_button.isEnabled():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import draft scores", "", "Spreadsheets (*.xlsx *.csv);;Excel workbooks (*.xlsx);;CSV files (*.csv)"
+            self, "Import draft scores", "", tabular.SPREADSHEET_FILTER
         )
         if not path:
             return
@@ -933,7 +934,6 @@ class GradeEntryPage(QWidget):
     REPORT_CARD_FIT_STEPS = (
         (9, 4, True), (8, 3, True), (7, 2, True), (7, 2, False), (6, 2, False), (6, 1, False),
     )
-    REPORT_CARD_TWO_COLUMN_THRESHOLD = 20
 
     @staticmethod
     def _card_signature_html(profile, settings, pad):
@@ -970,16 +970,30 @@ class GradeEntryPage(QWidget):
         settings = data.get("report_settings", {})
         logo_data = data.get("school_logo")
         photo_data = student.get("photo_data")
-        rows = "".join(
-            "<tr>"
-            f"<td>{escape(item['subject_code'])} — {escape(item['subject_name'])}</td>"
-            f"<td>{escape(item['points_earned'])} / {escape(item['points_possible'])}</td>"
-            f"<td>{escape(item['display_percentage'])}%</td>"
-            f"<td><b>{escape(item['grade_label'] or '')}</b></td>"
-            + (f"<td>{escape(item['remark'] or '')}</td>" if show_remark else "")
-            + "</tr>"
-            for item in data["subjects"]
-        )
+        subjects = data["subjects"]
+        compact_subject_grid = len(subjects) > 12
+        if compact_subject_grid:
+            cells = [
+                "<td><b>" + escape(f"{item['subject_code']} — {item['subject_name']}") + "</b><br>"
+                + f"Points: {escape(item['points_earned'])}/{escape(item['points_possible'])}"
+                + f" &nbsp; {escape(item['display_percentage'])}%"
+                + f" &nbsp; Grade: <b>{escape(item['grade_label'] or '')}</b>"
+                + (f" &nbsp; {escape(item['remark'] or '')}" if show_remark else "")
+                + "</td>"
+                for item in subjects
+            ]
+            rows = "".join("<tr>" + cells[index] + (cells[index + 1] if index + 1 < len(cells) else "<td></td>") + "</tr>" for index in range(0, len(cells), 2))
+        else:
+            rows = "".join(
+                "<tr>"
+                f"<td>{escape(item['subject_code'])} — {escape(item['subject_name'])}</td>"
+                f"<td>{escape(item['points_earned'])} / {escape(item['points_possible'])}</td>"
+                f"<td>{escape(item['display_percentage'])}%</td>"
+                f"<td><b>{escape(item['grade_label'] or '')}</b></td>"
+                + (f"<td>{escape(item['remark'] or '')}</td>" if show_remark else "")
+                + "</tr>"
+                for item in subjects
+            )
         name = escape(f"{student['last_name']}, {student['first_name']}")
         stage = f" · {escape(data['educational_stage'])}" if data.get("educational_stage") else ""
         overall = data.get("overall")
@@ -1006,28 +1020,35 @@ class GradeEntryPage(QWidget):
         )
         shows_position = style != "average_grade" and bool(position) and bool(overall and overall["complete"])
         position_note = " Class position ranks the unrounded overall average; equal averages share a position." if shows_position else ""
-        remark_header = "<th>Remark</th>" if show_remark else ""
+        remark_header = "<th>Remark</th>" if show_remark and not compact_subject_grid else ""
         term_dates = GradeEntryPage._term_dates_html(settings)
         photo = "<td width='84' align='right'><img src='student-photo'></td>" if photo_data else ""
         html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
-          body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; }}
-          h1 {{ color: #102a43; font-size:13pt; margin:2px 0; }}
+          body {{ font-family: sans-serif; color: #183247; font-size:{font_size}pt; margin:0; }}
+          p {{ margin:1px 0; }}
+          h1 {{ color: #102a43; font-size:{max(font_size + 4, 8)}pt; margin:1px 0; }}
           table {{ border-collapse: collapse; width: 100%; }}
           table.info td {{ border:0; padding:1px; }}
           table.grades th {{ background: #e8f0f6; text-align: left; }}
           table.grades th, table.grades td {{ border: 1px solid #9fb3c8; padding: {pad}px; }}
-          .summary {{ margin:4px 0 2px; font-size:{font_size + 1}pt; }} .key {{ margin:2px 0; font-size:{max(font_size - 1, 5)}pt; color:#486581; }}
-          .approval {{ margin-top: 3px; color: #486581; font-size:{max(font_size - 1, 5)}pt; }}
-          .school {{ text-align:center; margin-bottom:4px; }} .school h2 {{ margin:0; color:#102a43; }}
-          .signatures {{ width:100%; margin-top:4px; }} .signatures td {{ width:50%; border:0; padding:2px 18px; }}
-          .signline {{ border-top:1px solid #486581; padding-top:2px; margin-top:2px; }}
+          table.grades {{ table-layout:fixed; font-size:{font_size}pt; }}
+          table.grades th, table.grades td {{ line-height:80%; }}
+          table.grades th:nth-child(1), table.grades td:nth-child(1) {{ width:48%; white-space:nowrap; }}
+          table.grades th:nth-child(2), table.grades td:nth-child(2) {{ width:20%; }}
+          table.grades th:nth-child(3), table.grades td:nth-child(3) {{ width:18%; }}
+          table.grades th:nth-child(4), table.grades td:nth-child(4) {{ width:14%; }}
+          .summary {{ margin:2px 0 1px; font-size:{max(font_size, 5)}pt; }} .key {{ margin:1px 0; font-size:{max(font_size - 1, 4)}pt; color:#486581; }}
+          .approval {{ margin-top: 1px; color: #486581; font-size:{max(font_size - 1, 4)}pt; }}
+          .school {{ text-align:center; margin-bottom:2px; }} .school h2 {{ margin:0; color:#102a43; font-size:{max(font_size + 2, 7)}pt; }}
+          .signatures {{ width:100%; margin-top:1px; }} .signatures td {{ width:50%; border:0; padding:1px 10px; }}
+          .signline {{ border-top:1px solid #486581; padding-top:1px; margin-top:1px; }}
         </style></head><body>
           {GradeEntryPage._school_identity_html(profile, bool(logo_data))}
           <h1>Student Report Card</h1>
           <table class="info"><tr><td><b>{name}</b> &nbsp; Admission No.: {escape(student['admission_no'])}<br>
           Class: {escape(data['class_name'])} {escape(data['section'])}{stage}<br>
           Academic session: {escape(data['academic_session'])} &nbsp; Term: {data['term_order']}. {escape(data['term_name'])}{term_dates}</td>{photo}</tr></table>
-          <table class="grades"><thead><tr><th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th>{remark_header}</tr></thead>
+          <table class="grades"><thead><tr>{'<th colspan="2">Subject results</th>' if compact_subject_grid else f'<th>Subject</th><th>Points</th><th>Percentage</th><th>Grade</th>{remark_header}'}</tr></thead>
           <tbody>{rows}</tbody></table>
           {summary}{key_html}
           <div class="approval">Approved result card. Grades use the school's saved grading scale.{position_note}</div>
@@ -1039,183 +1060,6 @@ class GradeEntryPage(QWidget):
     def _render_report_card_pdf(cls, data, path):
         cls._render_class_report_cards_pdf({"report_cards": [data]}, path)
 
-    @staticmethod
-    def _draw_compact_report_card(painter, card, page_size):
-        """Paint long subject lists in three landscape columns with measured row heights."""
-        width, height = page_size.width(), page_size.height()
-        margin = 18.0
-        left, right = margin, width - margin
-        profile = card.get("school_profile", {})
-        settings = card.get("report_settings", {})
-        student = card["student"]
-        painter.fillRect(QRectF(0, 0, width, height), QColor("white"))
-
-        def set_font(size, bold=False):
-            font = QFont("Segoe UI")
-            font.setPointSizeF(size)
-            font.setBold(bold)
-            painter.setFont(font)
-            return QFontMetricsF(font)
-
-        def draw_text(value, rect, size=7.5, bold=False, color="#182230", flags=None):
-            set_font(size, bold)
-            painter.setPen(QColor(color))
-            if flags is None:
-                flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap
-            painter.drawText(rect, int(flags), str(value))
-
-        def draw_image(data, rect):
-            if data:
-                image = QImage.fromData(data)
-                if not image.isNull():
-                    image = image.scaled(
-                        int(rect.width()), int(rect.height()), Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    painter.drawImage(rect, image, QRectF(image.rect()))
-
-        draw_image(card.get("school_logo"), QRectF(left, 14, 42, 34))
-        draw_image(student.get("photo_data"), QRectF(right - 40, 14, 38, 38))
-        center = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-        draw_text(profile.get("school_name") or "SmartSchool Manager", QRectF(left + 48, 12, right - left - 96, 17), 13, True, "#102a43", center)
-        contact = " · ".join(value for value in (profile.get("address", ""), profile.get("phone", ""), profile.get("email", "")) if value)
-        draw_text(contact, QRectF(left + 48, 29, right - left - 96, 13), 7, False, "#5b6b7d", center)
-        draw_text("STUDENT REPORT CARD", QRectF(left, 48, right - left, 16), 10, True, "#102a43", center)
-
-        stage = f" · {card['educational_stage']}" if card.get("educational_stage") else ""
-        term_dates = []
-        for key, label in (("term_closing_date", "Closes"), ("next_term_begins", "Next term")):
-            value = settings.get(key) or ""
-            try:
-                term_dates.append(f"{label}: {date.fromisoformat(value).strftime('%d %b %Y').lstrip('0')}")
-            except ValueError:
-                pass
-        date_text = " · " + " · ".join(term_dates) if term_dates else ""
-        details = (
-            f"{student['last_name']}, {student['first_name']}  ·  Admission No.: {student['admission_no']}\n"
-            f"Class: {card['class_name']} {card['section']}{stage}  ·  Session: {card['academic_session']}  ·  "
-            f"Term: {card['term_order']}. {card['term_name']}{date_text}"
-        )
-        draw_text(details, QRectF(left, 67, right - left, 29), 8.5, True)
-
-        overall = card.get("overall") or {}
-        summary = []
-        if overall.get("complete"):
-            summary.append(f"Overall average: {overall['display_average']}%")
-            if settings.get("ranking_style", "position") == "average_grade":
-                if overall.get("grade_label"):
-                    summary.append(f"Average grade: {overall['grade_label']}")
-            elif card.get("position"):
-                position = card["position"]
-                summary.append(f"Class position: {position['position_text']} of {position['of']}")
-            summary.append(f"{overall['subject_count']} subjects")
-        draw_text("   ·   ".join(summary), QRectF(left, 96, right - left, 14), 8, True, "#155eef")
-
-        subjects = card.get("subjects", [])
-        if not subjects:
-            raise ValueError("The report card has no approved subject results to print.")
-        group_count = 3
-        group_size = ceil(len(subjects) / group_count)
-        groups = [subjects[index * group_size:(index + 1) * group_size] for index in range(group_count)]
-        group_width = (right - left) / group_count
-        column_widths = (group_width * 0.63, group_width * 0.14, group_width * 0.13, group_width * 0.10)
-        table_top, header_height = 115.0, 18.0
-        subject_font = QFont("Segoe UI")
-        subject_font.setPointSizeF(7.5)
-        subject_metrics = QFontMetricsF(subject_font)
-        row_heights = [26.0] * group_size
-
-        def compact_subject_name(value):
-            max_width = column_widths[0] - 8
-            lines = [""]
-            for word in str(value).split():
-                candidate = f"{lines[-1]} {word}".strip()
-                if not lines[-1] or subject_metrics.horizontalAdvance(candidate) <= max_width:
-                    lines[-1] = candidate
-                elif len(lines) < 2:
-                    lines.append(word)
-                else:
-                    lines[1] = subject_metrics.elidedText(
-                        f"{lines[1]} {word}", Qt.TextElideMode.ElideRight, int(max_width)
-                    )
-            return "\n".join(lines)
-        table_bottom = table_top + header_height + sum(row_heights)
-
-        key = card.get("grade_key") or []
-        key_text = "   ·   ".join(
-            f"{item['grade_label']} {item['from_text']}+" + (f" ({item['remark']})" if item.get("remark") else "")
-            for item in key
-        )
-        key_font = QFont("Segoe UI")
-        key_font.setPointSizeF(7)
-        key_metrics = QFontMetricsF(key_font)
-        key_bounds = key_metrics.boundingRect(
-            QRectF(left, 0, right - left, 100),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap), key_text,
-        ) if key_text else QRectF()
-        sign_specs = (
-            ("class_teacher_signature", "class_teacher_name", "class_teacher_title", "Class teacher"),
-            ("head_signature", "head_name", "head_title", "Head of school"),
-        )
-        signatures = []
-        for image_key, name_key, title_key, label in sign_specs:
-            label_text = " ".join(part for part in (profile.get(name_key, ""), profile.get(title_key, "")) if part)
-            image_data = settings.get(image_key)
-            if label_text or image_data:
-                signatures.append((image_data, label_text or label))
-        key_top = table_bottom + 7
-        signature_top = key_top + (key_bounds.height() + 5 if key_text else 0)
-        if signature_top + (38 if signatures else 0) > height - 12:
-            raise ValueError(
-                f"{student['first_name']} {student['last_name']}'s report card has too many subjects to fit on one page."
-            )
-
-        border = QPen(QColor("#9fb3c8"), 0.6)
-        painter.setPen(border)
-        y = table_top
-        for group_index in range(group_count):
-            x = left + group_index * group_width
-            painter.fillRect(QRectF(x, y, group_width, header_height), QColor("#e8f0f6"))
-            cell_x = x
-            for label, cell_width in zip(("Subject", "Points", "%", "Grade"), column_widths):
-                cell = QRectF(cell_x, y, cell_width, header_height)
-                painter.drawRect(cell)
-                draw_text(label, cell.adjusted(3, 0, -3, 0), 7, True, "#102a43")
-                cell_x += cell_width
-
-        y += header_height
-        for row, row_height in enumerate(row_heights):
-            for group_index, group in enumerate(groups):
-                if row >= len(group):
-                    continue
-                item = group[row]
-                values = (
-                    compact_subject_name(item["subject_name"]),
-                    f"{item['points_earned']}/{item['points_possible']}",
-                    f"{item['display_percentage']}%",
-                    str(item.get("grade_label") or ""),
-                )
-                cell_x = left + group_index * group_width
-                for column_index, (value, cell_width) in enumerate(zip(values, column_widths)):
-                    cell = QRectF(cell_x, y, cell_width, row_height)
-                    painter.drawRect(cell)
-                    align = Qt.AlignmentFlag.AlignLeft if column_index == 0 else Qt.AlignmentFlag.AlignCenter
-                    draw_text(value, cell.adjusted(3, 1, -3, -1), 7.5 if column_index == 0 else 7,
-                              column_index == 3, flags=align | Qt.AlignmentFlag.AlignVCenter)
-                    cell_x += cell_width
-            y += row_height
-
-        if key_text:
-            draw_text("Grading key: " + key_text, QRectF(left, key_top, right - left, key_bounds.height() + 3), 7, False, "#486581")
-        if signatures:
-            sign_width = (right - left) / len(signatures)
-            for index, (image_data, label_text) in enumerate(signatures):
-                x = left + index * sign_width
-                draw_image(image_data, QRectF(x + 4, signature_top, 120, 20))
-                line = QRectF(x + 4, signature_top + 23, sign_width - 12, 0.7)
-                painter.fillRect(line, QColor("#486581"))
-                draw_text(label_text, QRectF(x + 4, signature_top + 25, sign_width - 12, 12), 7, False, "#486581")
-
     @classmethod
     def _render_class_report_cards_pdf(cls, data, path):
         """Write one A4 page per student; each page shrinks its layout until the whole card fits."""
@@ -1224,9 +1068,7 @@ class GradeEntryPage(QWidget):
             raise ValueError("The class has no approved student report cards to export.")
         writer = QPdfWriter(path)
         writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-        if any(len(card.get("subjects", [])) >= cls.REPORT_CARD_TWO_COLUMN_THRESHOLD for card in cards):
-            writer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        writer.setPageMargins(QMarginsF(10, 10, 10, 10), QPageLayout.Unit.Millimeter)
+        writer.setPageMargins(QMarginsF(5, 5, 5, 5), QPageLayout.Unit.Millimeter)
         page_size = writer.pageLayout().paintRect(QPageLayout.Unit.Point).size()
         painter = QPainter(writer)
         pdf_scale = writer.resolution() / 72.0
@@ -1234,13 +1076,6 @@ class GradeEntryPage(QWidget):
         for index, card in enumerate(cards):
             if index:
                 writer.newPage()
-            if len(card.get("subjects", [])) >= cls.REPORT_CARD_TWO_COLUMN_THRESHOLD:
-                try:
-                    cls._draw_compact_report_card(painter, card, page_size)
-                except Exception:
-                    painter.end()
-                    raise
-                continue
             document = QTextDocument()
             document.setPageSize(page_size)
             settings = card.get("report_settings", {})
@@ -1258,6 +1093,7 @@ class GradeEntryPage(QWidget):
                     image = image.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                     document.addResource(QTextDocument.ResourceType.ImageResource, QUrl(key), image)
             fitted = False
+            measured_heights = []
             for font_size, pad, show_remark in cls.REPORT_CARD_FIT_STEPS:
                 page_html = (
                     cls._report_card_html(card, font_size, pad, show_remark)
@@ -1266,13 +1102,16 @@ class GradeEntryPage(QWidget):
                     .replace("src='head-signature'", f"src='head-signature-{index}'")
                 )
                 document.setHtml(page_html)
-                if document.documentLayout().documentSize().height() <= page_size.height():
+                measured_height = document.documentLayout().documentSize().height()
+                measured_heights.append(round(measured_height, 1))
+                if measured_height <= page_size.height():
                     fitted = True
                     break
             if not fitted:
                 painter.end()
                 raise ValueError(
-                    f"{card['student']['first_name']} {card['student']['last_name']}'s report card has too many subjects to fit on one page."
+                    f"{card['student']['first_name']} {card['student']['last_name']}'s report card has too many subjects to fit on one page. "
+                    f"Measured heights: {measured_heights}; page height: {page_size.height():.1f} pt."
                 )
             document.drawContents(painter)
         painter.end()

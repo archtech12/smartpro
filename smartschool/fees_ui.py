@@ -168,7 +168,11 @@ class StudentStatementDialog(QDialog):
         self.reference = QLineEdit()
         self.reference.setMaxLength(100)
         self.reference.setPlaceholderText("Optional transaction reference")
+        self.pay_ahead = QCheckBox("Also pay ahead for later terms that already have issued invoices (for example the whole session)")
+        self.pay_ahead.setVisible(False)
+        self.pay_ahead.toggled.connect(lambda _checked: self._set_actions())
         form.addRow("Lump-sum amount", self.amount)
+        form.addRow("", self.pay_ahead)
         form.addRow("Payment method", self.method)
         form.addRow("Payment date", self.received_on)
         form.addRow("Reference", self.reference)
@@ -193,7 +197,10 @@ class StudentStatementDialog(QDialog):
 
     def _set_actions(self):
         has_data = self._data is not None
-        owing = has_data and Decimal(self._data["total_outstanding"]) > 0
+        owing = has_data and (
+            Decimal(self._data["total_outstanding"])
+            + (Decimal(self._data["later_outstanding"]) if self.pay_ahead.isChecked() else Decimal("0"))
+        ) > 0
         self.pay_button.setEnabled(not self._busy and owing)
         self.amount.setEnabled(not self._busy and owing)
         self.print_button.setEnabled(not self._busy and has_data)
@@ -242,9 +249,15 @@ class StudentStatementDialog(QDialog):
             )
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(value))
+        later_due = Decimal(data["later_outstanding"])
+        self.pay_ahead.setVisible(later_due > 0)
+        if later_due > 0:
+            self.pay_ahead.setText(
+                f"Also pay ahead for later terms (issued invoices not yet due: {data['later_outstanding']})"
+            )
         self.status.setText(
             "No issued invoices up to the active term." if not data["items"] else
-            (f"{data['later_term_invoice_count']} issued invoice(s) for later terms are not included."
+            (f"{data['later_term_invoice_count']} issued invoice(s) for later terms are not in the total above."
              if data["later_term_invoice_count"] else "")
         )
         self._set_actions()
@@ -256,10 +269,11 @@ class StudentStatementDialog(QDialog):
             return
         received_on = self.received_on.date().toString("yyyy-MM-dd")
         method, reference = self.method.currentData(), self.reference.text().strip()
+        ahead = self.pay_ahead.isChecked()
         self.status.setText("Recording payment…")
         self._run(
             lambda: db.record_fee_lump_sum_payment(
-                self.student_id, amount, received_on, method, reference, self.username
+                self.student_id, amount, received_on, method, reference, self.username, include_later_terms=ahead
             ),
             self._paid,
         )

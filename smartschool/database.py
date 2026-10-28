@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 29
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -770,15 +770,113 @@ def _migration_26(conn: sqlite3.Connection) -> None:
 
 
 def _migration_27(conn: sqlite3.Connection) -> None:
-    """Add the configurable prefix used for newly generated student admission IDs."""
+    """Email delivery: SMTP settings, send retries, report-card attachments and the credit ledger.
+
+    The v25 communication tables only allowed a few statuses, kinds and setting keys, and SQLite
+    cannot relax a CHECK in place, so they are rebuilt (copying every row). ``initialize`` has
+    already made a verified backup of the database before this runs.
+    """
+    conn.execute("ALTER TABLE communication_messages RENAME TO communication_messages_v25")
+    conn.execute("ALTER TABLE communication_templates RENAME TO communication_templates_v25")
+    conn.execute("ALTER TABLE communication_settings RENAME TO communication_settings_v25")
+    for index in ("idx_comm_messages_dedupe", "idx_comm_messages_status"):
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
+    conn.execute(
+        """CREATE TABLE communication_templates(
+            kind TEXT PRIMARY KEY CHECK(kind IN ('birthday','fee_reminder','welcome','notice','report_card')),
+            subject TEXT NOT NULL CHECK(length(subject) BETWEEN 1 AND 200),
+            body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 4000),
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        """INSERT INTO communication_templates(kind,subject,body,updated_by,updated_at)
+           SELECT kind,subject,body,updated_by,updated_at FROM communication_templates_v25"""
+    )
+    conn.execute(
+        """CREATE TABLE communication_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK(kind IN ('birthday','fee_reminder','welcome','notice','report_card')),
+            channel TEXT NOT NULL CHECK(channel IN ('email','whatsapp')),
+            student_id INTEGER REFERENCES students(id),
+            recipient_name TEXT NOT NULL,
+            recipient_contact TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','cancelled','failed')),
+            dedupe_key TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            handled_by TEXT,
+            handled_at TEXT,
+            attachment_path TEXT CHECK(attachment_path IS NULL OR length(attachment_path)<=500),
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count>=0),
+            last_error TEXT CHECK(last_error IS NULL OR length(last_error)<=300),
+            last_attempt_at TEXT,
+            credit_cost INTEGER NOT NULL DEFAULT 0 CHECK(credit_cost>=0))"""
+    )
+    conn.execute(
+        """INSERT INTO communication_messages(id,kind,channel,student_id,recipient_name,recipient_contact,subject,body,
+                                              status,dedupe_key,created_by,created_at,handled_by,handled_at)
+           SELECT id,kind,channel,student_id,recipient_name,recipient_contact,subject,body,
+                  status,dedupe_key,created_by,created_at,handled_by,handled_at FROM communication_messages_v25"""
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_comm_messages_dedupe ON communication_messages(dedupe_key) "
+        "WHERE dedupe_key IS NOT NULL AND status IN ('pending','sent','failed')"
+    )
+    conn.execute("CREATE INDEX idx_comm_messages_status ON communication_messages(status,created_at)")
+    conn.execute(
+        """CREATE TABLE communication_settings(
+            key TEXT PRIMARY KEY CHECK(key IN ('country_code','smtp_host','smtp_port','smtp_security','smtp_username',
+                'sender_email','sender_name','smtp_password','daily_limit','delay_seconds','max_retries','license_id')),
+            value TEXT NOT NULL CHECK(length(value)<=300),
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        "INSERT INTO communication_settings(key,value,updated_by,updated_at) "
+        "SELECT key,value,updated_by,updated_at FROM communication_settings_v25"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS communication_credits(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_type TEXT NOT NULL CHECK(entry_type IN ('topup','deduction')),
+            amount INTEGER NOT NULL CHECK(amount<>0),
+            description TEXT NOT NULL CHECK(length(description)<=200),
+            reference TEXT CHECK(reference IS NULL OR length(reference)<=60),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK((entry_type='topup' AND amount>0) OR (entry_type='deduction' AND amount<0)))"""
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_credits_topup_reference ON communication_credits(reference) "
+        "WHERE entry_type='topup' AND reference IS NOT NULL"
+    )
+    for table in ("communication_messages_v25", "communication_templates_v25", "communication_settings_v25"):
+        conn.execute(f"DROP TABLE {table}")
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(27)")
+    conn.execute("PRAGMA user_version = 27")
+
+
+def _migration_28(conn: sqlite3.Connection) -> None:
+    """Retain the schema sequence without reinstating the removed question module."""
+    conn.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES(28)")
+    conn.execute("PRAGMA user_version = 28")
+
+
+def _migration_29(conn: sqlite3.Connection) -> None:
+    """Remove deferred CBT data and add the configurable student ID prefix."""
+    for table in ("cbt_answers", "cbt_attempts", "cbt_exam_questions", "cbt_questions", "cbt_exams"):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
     columns = {row[1] for row in conn.execute("PRAGMA table_info(school_profile)")}
     if "admission_id_prefix" not in columns:
         conn.execute(
             "ALTER TABLE school_profile ADD COLUMN admission_id_prefix TEXT NOT NULL DEFAULT 'ADM' "
             "CHECK(length(admission_id_prefix) BETWEEN 1 AND 16)"
         )
-    conn.execute("INSERT INTO schema_migrations(version) VALUES(27)")
-    conn.execute("PRAGMA user_version = 27")
+    conn.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES(29)")
+    conn.execute("PRAGMA user_version = 29")
 
 
 def initialize() -> None:
@@ -847,6 +945,10 @@ def initialize() -> None:
                 _migration_26(conn)
             elif next_version == 27:
                 _migration_27(conn)
+            elif next_version == 28:
+                _migration_28(conn)
+            elif next_version == 29:
+                _migration_29(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()
@@ -983,9 +1085,7 @@ def save_school_profile(
         conn.execute("BEGIN IMMEDIATE")
         actor = _require_admin(conn, actor)
         if values["admission_id_prefix"] is None:
-            saved_prefix = conn.execute(
-                "SELECT admission_id_prefix FROM school_profile WHERE id=1"
-            ).fetchone()
+            saved_prefix = conn.execute("SELECT admission_id_prefix FROM school_profile WHERE id=1").fetchone()
             values["admission_id_prefix"] = saved_prefix[0] if saved_prefix else "ADM"
         columns = ",".join(f"{field}=?" for field, _limit in SCHOOL_PROFILE_FIELDS)
         params = [values[field] for field, _limit in SCHOOL_PROFILE_FIELDS]
@@ -2894,63 +2994,65 @@ def load_master_sheet_data(academic_session_id: int, class_id: int, term_id: int
 def _load_master_sheet_in_transaction(
     conn, academic_session_id: int, class_id: int, term_id: int, include_school_assets: bool = True
 ) -> dict:
-    term = conn.execute(
-        "SELECT academic_session_id,term_name,term_order FROM terms WHERE id=?", (term_id,)
-    ).fetchone()
-    session = conn.execute("SELECT name FROM academic_sessions WHERE id=?", (academic_session_id,)).fetchone()
-    class_row = conn.execute("SELECT class_name,section FROM classes WHERE id=?", (class_id,)).fetchone()
-    if not term or not session or not class_row or term["academic_session_id"] != academic_session_id:
-        raise ValueError("Select a valid session, class, and term.")
-    assignments = conn.execute(
-        "SELECT id FROM class_subject_assignments WHERE academic_session_id=? AND class_id=? ORDER BY id",
-        (academic_session_id, class_id),
-    ).fetchall()
-    if not assignments:
-        raise ValueError("No class subjects are assigned for this academic session.")
-    subject_sets = [
-        _load_approved_subject_results(conn, int(item["id"]), term_id)
-        for item in assignments
-    ]
-    expected_roster = subject_sets[0]["roster_ids"]
-    if any(item["roster_ids"] != expected_roster for item in subject_sets[1:]):
-        raise ValueError("Subject result rosters differ. Resolve enrollment or score-entry rosters before creating a master sheet.")
-    by_enrollment = {
-        int(student["enrollment_id"]): dict(student)
-        for student in subject_sets[0]["students"]
-    }
-    subjects = []
-    for result_set in subject_sets:
-        assignment = result_set["assignment"]
-        subjects.append({"id": int(assignment["id"]), "subject_code": assignment["subject_code"], "subject_name": assignment["subject_name"]})
-        for student in result_set["students"]:
-            by_enrollment[int(student["enrollment_id"])].setdefault("results", {})[
-                int(assignment["id"])
-            ] = student["result"]
-    common_bands = _common_grade_bands([item["bands"] for item in subject_sets])
-    exact_averages = {}
-    for enrollment_id, student in by_enrollment.items():
-        student_results = list(student["results"].values())
-        student["overall"] = calculate_overall_average(student_results, common_bands)
-        exact_averages[enrollment_id] = _overall_average_fraction(student_results)
-    positions = calculate_class_positions(exact_averages)
-    for enrollment_id, student in by_enrollment.items():
-        student["position"] = positions[enrollment_id]
-    students = sorted(
-        by_enrollment.values(),
-        key=lambda item: (item["last_name"].casefold(), item["first_name"].casefold(), int(item["enrollment_id"])),
-    )
-    return {
-        "academic_session": session["name"], "term_name": term["term_name"],
-        "term_order": int(term["term_order"]), "class_name": class_row["class_name"],
-        "section": class_row["section"], "subjects": subjects, "students": students,
-        "approval_status": "Approved",
-        "school_profile": _school_profile_in_transaction(conn) if include_school_assets else {},
-        "school_logo": _school_logo_in_transaction(conn) if include_school_assets else None,
-    }
+        term = conn.execute(
+            "SELECT academic_session_id,term_name,term_order FROM terms WHERE id=?", (term_id,)
+        ).fetchone()
+        session = conn.execute("SELECT name FROM academic_sessions WHERE id=?", (academic_session_id,)).fetchone()
+        class_row = conn.execute("SELECT class_name,section FROM classes WHERE id=?", (class_id,)).fetchone()
+        if not term or not session or not class_row or term["academic_session_id"] != academic_session_id:
+            raise ValueError("Select a valid session, class, and term.")
+        assignments = conn.execute(
+            "SELECT id FROM class_subject_assignments WHERE academic_session_id=? AND class_id=? ORDER BY id",
+            (academic_session_id, class_id),
+        ).fetchall()
+        if not assignments:
+            raise ValueError("No class subjects are assigned for this academic session.")
+        subject_sets = [
+            _load_approved_subject_results(conn, int(item["id"]), term_id)
+            for item in assignments
+        ]
+        expected_roster = subject_sets[0]["roster_ids"]
+        if any(item["roster_ids"] != expected_roster for item in subject_sets[1:]):
+            raise ValueError("Subject result rosters differ. Resolve enrollment or score-entry rosters before creating a master sheet.")
+        by_enrollment = {
+            int(student["enrollment_id"]): dict(student)
+            for student in subject_sets[0]["students"]
+        }
+        subjects = []
+        for result_set in subject_sets:
+            assignment = result_set["assignment"]
+            subjects.append({"id": int(assignment["id"]), "subject_code": assignment["subject_code"], "subject_name": assignment["subject_name"]})
+            for student in result_set["students"]:
+                by_enrollment[int(student["enrollment_id"])].setdefault("results", {})[
+                    int(assignment["id"])
+                ] = student["result"]
+        common_bands = _common_grade_bands([item["bands"] for item in subject_sets])
+        exact_averages = {}
+        for enrollment_id, student in by_enrollment.items():
+            student_results = list(student["results"].values())
+            student["overall"] = calculate_overall_average(student_results, common_bands)
+            exact_averages[enrollment_id] = _overall_average_fraction(student_results)
+        positions = calculate_class_positions(exact_averages)
+        for enrollment_id, student in by_enrollment.items():
+            student["position"] = positions[enrollment_id]
+        students = sorted(
+            by_enrollment.values(),
+            key=lambda item: (item["last_name"].casefold(), item["first_name"].casefold(), int(item["enrollment_id"])),
+        )
+        return {
+            "academic_session": session["name"], "term_name": term["term_name"],
+            "term_order": int(term["term_order"]), "class_name": class_row["class_name"],
+            "section": class_row["section"], "subjects": subjects, "students": students,
+            "approval_status": "Approved",
+            "school_profile": _school_profile_in_transaction(conn) if include_school_assets else {},
+            "school_logo": _school_logo_in_transaction(conn) if include_school_assets else None,
+        }
 
 
-def _top_academic_achievers_in_transaction(conn, academic_session_id: int, term_id: int, limit: int = 5) -> list[dict]:
-    """Return leaders only from complete, approved, roster-consistent class results."""
+def _top_academic_achievers_in_transaction(
+    conn, academic_session_id: int, term_id: int, limit: int = 5
+) -> list[dict]:
+    """Rank students only from complete, approved, roster-consistent class results."""
     ranked = []
     classes = conn.execute("SELECT id,class_name,section FROM classes ORDER BY class_name,section,id").fetchall()
     for class_row in classes:
@@ -2968,7 +3070,7 @@ def _top_academic_achievers_in_transaction(conn, academic_session_id: int, term_
                 "class": class_name,
                 "average": student["overall"]["average"],
             })
-    ranked.sort(key=lambda item: (-float(item["average"]), item["name"].casefold(), item["class"].casefold()))
+    ranked.sort(key=lambda item: (-Decimal(item["average"]), item["name"].casefold(), item["class"].casefold()))
     return ranked[:max(0, min(int(limit), 20))]
 
 
@@ -2996,16 +3098,14 @@ def _validate_enrollment_date(value: str, session, field_name: str) -> str:
 
 
 def _generate_admission_number(conn: sqlite3.Connection, year: str, next_number: int, reserved: set[str] | None = None):
-    """Generate a unique, configured-prefix admission ID inside the caller's write transaction."""
+    """Generate a unique, configured-prefix admission ID inside the write transaction."""
     row = conn.execute("SELECT admission_id_prefix FROM school_profile WHERE id=1").fetchone()
     prefix = str(row[0] if row else "ADM")
     reserved = reserved or set()
     while True:
         admission_no = f"{prefix}-{year}-{next_number:05d}"
         if (admission_no.casefold() not in reserved
-                and not conn.execute(
-                    "SELECT 1 FROM students WHERE admission_no=? COLLATE NOCASE", (admission_no,)
-                ).fetchone()):
+                and not conn.execute("SELECT 1 FROM students WHERE admission_no=? COLLATE NOCASE", (admission_no,)).fetchone()):
             return admission_no, next_number + 1
         next_number += 1
 
@@ -3133,7 +3233,7 @@ def register_students_bulk(
         if not isinstance(student, dict):
             raise ValueError(f"Student row {index} is invalid.")
         values = {}
-        for field, limit in (("admission_no", 100), ("first_name", 100), ("last_name", 100), ("gender", 30), ("guardian_phone", 60)):
+        for field, limit in (("first_name", 100), ("last_name", 100), ("gender", 30), ("guardian_phone", 60)):
             value = student.get(field, "")
             if not isinstance(value, str):
                 raise ValueError(f"Student row {index}: {field.replace('_', ' ')} must be text.")
@@ -3141,6 +3241,12 @@ def register_students_bulk(
             if len(value) > limit:
                 raise ValueError(f"Student row {index}: {field.replace('_', ' ')} must be at most {limit} characters.")
             values[field] = value
+        admission_no = student.get("admission_no", "")
+        if not isinstance(admission_no, str):
+            raise ValueError(f"Student row {index}: admission number must be text.")
+        values["admission_no"] = admission_no.strip()
+        if len(values["admission_no"]) > 80:
+            raise ValueError(f"Student row {index}: admission number must be at most 80 characters.")
         try:
             values["nin"], values["date_of_birth"], values["email"] = normalize_optional_student_details(
                 student.get("nin", ""), student.get("date_of_birth", ""), student.get("email", "")
@@ -3150,9 +3256,6 @@ def register_students_bulk(
         if not values["first_name"] or not values["last_name"]:
             raise ValueError(f"Student row {index}: first and last name are required.")
         normalized_students.append(values)
-    supplied_numbers = [row["admission_no"].casefold() for row in normalized_students if row["admission_no"]]
-    if len(supplied_numbers) != len(set(supplied_numbers)):
-        raise ValueError("The import contains duplicate admission numbers.")
     enrolled_on = _iso_date(enrolled_on, "Enrollment date").isoformat()
 
     with connection() as conn:
@@ -3171,18 +3274,20 @@ def register_students_bulk(
             raise ValueError("Select an existing class and section.")
         class_label = " ".join(part for part in (class_row["class_name"], class_row["section"]) if part)
         next_number = int(conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM students").fetchone()[0])
-        for admission_no in (row["admission_no"] for row in normalized_students if row["admission_no"]):
+        supplied_numbers = [s["admission_no"] for s in normalized_students if s["admission_no"]]
+        folded = [value.casefold() for value in supplied_numbers]
+        if len(folded) != len(set(folded)):
+            raise ValueError("The import contains duplicate admission numbers.")
+        for admission_no in supplied_numbers:
             if conn.execute("SELECT 1 FROM students WHERE admission_no=? COLLATE NOCASE", (admission_no,)).fetchone():
                 raise ValueError(f"Admission number {admission_no!r} is already in use.")
+        reserved_numbers = set(folded)
         admission_numbers = []
-        reserved_numbers = set(supplied_numbers)
         for student in normalized_students:
             year = enrolled_on[:4]
             admission_no = student["admission_no"]
             if not admission_no:
-                admission_no, next_number = _generate_admission_number(
-                    conn, year, next_number, reserved_numbers
-                )
+                admission_no, next_number = _generate_admission_number(conn, year, next_number, reserved_numbers)
                 reserved_numbers.add(admission_no.casefold())
             cursor = conn.execute(
                 "INSERT INTO students(admission_no,first_name,last_name,gender,class_name,guardian_phone,nin,date_of_birth,email) "
@@ -3716,10 +3821,36 @@ def export_csv(module_name: str, path: str) -> None:
             return "'" + value
         return value
 
-    from .spreadsheet_files import write_rows
-    with connection() as db:
+    with connection() as db, open(path, "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file)
+        writer.writerow(labels)
         rows = db.execute(f"SELECT {','.join(columns)} FROM {spec['table']} ORDER BY id")
-        write_rows(path, labels, ([spreadsheet_safe(row[column]) for column in columns] for row in rows))
+        for row in rows:
+            writer.writerow([spreadsheet_safe(row[column]) for column in columns])
+
+
+def export_module_rows(module_name: str) -> tuple[list[str], list[list]]:
+    """Column headings and every row of one record module, for spreadsheet export."""
+    _authorized(module_name, None)
+    spec = MODULES[module_name]
+    columns = [field[0] for field in spec["fields"]]
+    with connection() as db:
+        rows = [[row[column] for column in columns] for row in db.execute(
+            f"SELECT {','.join(columns)} FROM {spec['table']} ORDER BY id")]
+    return columns, rows
+
+
+def export_module_xlsx(module_name: str, path: str) -> str:
+    """Write one record module to an Excel workbook (all cells text; formulas neutralised)."""
+    from . import tabular
+
+    headings, rows = export_module_rows(module_name)
+    text_columns = [h for h in headings if h in {"guardian_phone", "phone", "nin", "admission_no", "staff_no"}]
+    saved = tabular.write_workbook(path, [{
+        "name": module_name, "headers": headings, "rows": rows,
+        "text_columns": text_columns, "neutralize_formulas": True,
+    }])
+    return str(saved)
 
 
 def _attendance_roster(conn: sqlite3.Connection, session_id: int, class_id: int, attendance_date: str):
@@ -4760,21 +4891,31 @@ def _fee_statement_in_transaction(conn: sqlite3.Connection, student_id: int) -> 
            WHERE e.student_id=? ORDER BY a.starts_on,t.term_order,i.id""",
         (student_id,),
     ).fetchall()
-    items, later = [], 0
-    billed = paid_total = outstanding = Decimal("0")
+    items, later_items = [], []
+    billed = paid_total = outstanding = later_outstanding = Decimal("0")
     for row in rows:
         same_session = int(row["academic_session_id"]) == int(session["id"])
-        if (not same_session and row["starts_on"] > session["starts_on"]) or (
+        is_later = (not same_session and row["starts_on"] > session["starts_on"]) or (
             same_session and int(row["term_order"]) > int(term["term_order"])
-        ):
-            later += 1
-            continue
+        )
         total = _decimal_value(row["total_amount_text"], "Invoice total")
         paid = _invoice_net_paid(conn, int(row["id"]))
         balance = total - paid
         fees = ", ".join(line[0] for line in conn.execute(
             "SELECT fee_type_name_snapshot FROM fee_invoice_lines WHERE invoice_id=? ORDER BY id", (row["id"],)
         ))
+        if is_later:
+            later_items.append({
+                "invoice_id": int(row["id"]), "invoice_number": row["invoice_number"],
+                "session_name": row["session_name"], "term_name": row["term_name"],
+                "term_order": int(row["term_order"]), "class_name": row["class_name"], "section": row["section"],
+                "fees": fees, "total_amount_text": _decimal_text(total), "paid_amount_text": _decimal_text(paid),
+                "balance_amount_text": _decimal_text(balance),
+                "status": "Paid" if balance <= 0 else ("Part paid" if paid > 0 else "Unpaid"), "carried_over": False,
+                "later_term": True,
+            })
+            later_outstanding += balance
+            continue
         items.append({
             "invoice_id": int(row["id"]), "invoice_number": row["invoice_number"],
             "session_name": row["session_name"], "term_name": row["term_name"],
@@ -4793,7 +4934,8 @@ def _fee_statement_in_transaction(conn: sqlite3.Connection, student_id: int) -> 
             "first_name": student["first_name"], "last_name": student["last_name"],
         },
         "current_session": session["name"], "current_term": term["term_name"],
-        "items": items, "later_term_invoice_count": later,
+        "items": items, "later_term_invoice_count": len(later_items),
+        "later_items": later_items, "later_outstanding": _decimal_text(later_outstanding),
         "total_billed": _decimal_text(billed), "total_paid": _decimal_text(paid_total),
         "total_outstanding": _decimal_text(outstanding),
     }
@@ -4813,12 +4955,14 @@ def load_student_fee_statement(student_id: int, actor: str) -> dict:
 
 
 def record_fee_lump_sum_payment(
-    student_id: int, amount, received_on: str, method: str, reference: str, actor: str
+    student_id: int, amount, received_on: str, method: str, reference: str, actor: str,
+    include_later_terms: bool = False,
 ) -> dict:
     """Record one payment and allocate it oldest-first across a student's outstanding invoices.
 
-    Only issued invoices up to the active term are paid. The amount may not exceed what
-    is outstanding. Each allocation is a normal immutable payment row, all sharing one
+    Only issued invoices up to the active term are paid, unless ``include_later_terms`` is set:
+    then issued invoices for later terms are paid too (paying ahead, e.g. a whole session), still
+    oldest first. The amount may not exceed what is outstanding in the chosen scope. Each allocation is a normal immutable payment row, all sharing one
     lump-sum receipt number, so individual allocations can still be reversed with a reason.
     """
     if isinstance(student_id, bool) or not isinstance(student_id, int) or student_id <= 0:
@@ -4837,7 +4981,8 @@ def record_fee_lump_sum_payment(
         conn.execute("BEGIN IMMEDIATE")
         actor = _require_admin(conn, actor)
         statement = _fee_statement_in_transaction(conn, student_id)
-        outstanding = _decimal_value(statement["total_outstanding"], "Outstanding balance")
+        payable = list(statement["items"]) + (list(statement["later_items"]) if include_later_terms else [])
+        outstanding = sum((_decimal_value(i["balance_amount_text"], "Invoice balance") for i in payable if _decimal_value(i["balance_amount_text"], "Invoice balance") > 0), Decimal("0"))
         if outstanding <= 0:
             raise ValueError("This student has no outstanding balance up to the active term.")
         if value > outstanding:
@@ -4845,7 +4990,7 @@ def record_fee_lump_sum_payment(
         lump_sum_number = f"LS-{received_on[:4]}-{secrets.token_hex(4).upper()}"
         remaining = value
         allocations = []
-        for item in statement["items"]:
+        for item in payable:
             balance = _decimal_value(item["balance_amount_text"], "Invoice balance")
             if balance <= 0:
                 continue

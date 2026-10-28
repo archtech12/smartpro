@@ -1,4 +1,4 @@
-"""Preview-first dialog for bulk student registration from CSV/Excel."""
+"""Preview-first dialog for bulk student registration from CSV."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from .table_helpers import configure_table_headers
 from .ui_helpers import wrapped_label
 from . import database as db
+from . import tabular
 from .student_import import preview_student_import
 
 
@@ -36,7 +37,7 @@ class StudentImportDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(wrapped_label(
             "Choose the class placement, academic session, and enrollment date for this file. "
-            "The spreadsheet supplies each student's name and optional details. Choose a class, session, and date here."
+            "Use full_name or first_name plus last_name. Admission number is optional: the app generates one when it is blank."
         ))
         form = QFormLayout()
         self.class_section = QComboBox()
@@ -59,17 +60,17 @@ class StudentImportDialog(QDialog):
         layout.addLayout(form)
 
         file_row = QHBoxLayout()
-        self.choose_file_button = QPushButton("Choose student file…")
+        self.choose_file_button = QPushButton("Choose Excel or CSV file…")
         self.file_label = QLabel("No file selected")
         self.file_label.setWordWrap(True)
         file_row.addWidget(self.choose_file_button)
         file_row.addWidget(self.file_label, 1)
         layout.addLayout(file_row)
-        self.status = QLabel("Choose a CSV or Excel workbook (.xlsx). Full name or first and last names are accepted.")
+        self.status = QLabel("Use the template so the column names match. Excel (.xlsx) and CSV files both work.")
         layout.addWidget(self.status)
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels([
-            "Admission No.", "First Name", "Last Name", "Gender", "Guardian Phone", "NIN", "Date of Birth", "Email"
+            "Admission No", "First Name", "Last Name", "Gender", "Guardian Phone Number", "NIN", "Date of Birth", "Email"
         ])
         configure_table_headers(self.table)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -106,21 +107,29 @@ class StudentImportDialog(QDialog):
 
     def _choose_file(self):
         path, _selected_filter = QFileDialog.getOpenFileName(
-            self, "Choose student file", "", "Spreadsheets (*.xlsx *.csv);;Excel workbooks (*.xlsx);;CSV files (*.csv)"
+            self, "Choose student file", "", tabular.SPREADSHEET_FILTER
         )
         if not path:
             return
         try:
-            preview = preview_student_import(path)
-        except (OSError, ValueError) as exc:
-            self._rows = []
-            self._file_path = ""
-            self.file_label.setText("No valid file selected")
-            self.status.setText("The file was not imported.")
-            self.table.setRowCount(0)
-            self.import_button.setEnabled(False)
-            QMessageBox.warning(self, "Student file not accepted", str(exc))
-            return
+            self._load_preview(path)
+        except Exception as exc:  # a bad file must never close the application
+            self._reject_file(str(exc))
+
+    def _reject_file(self, message):
+        self._rows = []
+        self._file_path = ""
+        self.file_label.setText("No valid file selected")
+        self.status.setText("The file was not imported.")
+        self.table.setRowCount(0)
+        self.import_button.setEnabled(False)
+        box = QMessageBox(QMessageBox.Icon.Warning, "Student file not accepted", message.split("\n")[0], parent=self)
+        if "\n" in message:
+            box.setDetailedText(message)
+        box.exec()
+
+    def _load_preview(self, path):
+        preview = preview_student_import(path)
         self._file_path = path
         self._rows = preview["rows"]
         self.file_label.setText(path)
@@ -131,20 +140,21 @@ class StudentImportDialog(QDialog):
                 self.table.setItem(row_index, column, QTableWidgetItem(row[key]))
         self.table.setUpdatesEnabled(True)
         self.table.resizeColumnsToContents()
+        notes = " ".join(preview.get("warnings", []))
         self.status.setText(
-            f"Preview passed: {len(self._rows)} student(s). No records have been saved yet."
+            f"Preview passed: {len(self._rows)} student(s). No records have been saved yet." + (f"  Note: {notes}" if notes else "")
         )
         self.import_button.setEnabled(self.class_section.currentData() is not None and self.session.currentData() is not None)
 
     def _accept_if_ready(self):
         if not self._rows or self.class_section.currentData() is None or self.session.currentData() is None:
-            QMessageBox.information(self, "Choose import details", "Choose a valid student spreadsheet, class, and academic session.")
+            QMessageBox.information(self, "Choose import details", "Choose a valid file, class, and academic session.")
             return
         answer = QMessageBox.question(
             self,
             "Confirm student registrations",
             f"Register {len(self._rows)} student(s) in {self.class_section.currentText()} "
-            f"for {self.session.currentText()}? Supplied admission numbers are preserved; missing ones are generated. This saves the entire "
+            f"for {self.session.currentText()}? Supplied admission numbers will be preserved; missing IDs will be generated. This saves the entire "
             "file as one transaction; if any record cannot be saved, none will be added.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

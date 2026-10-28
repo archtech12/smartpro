@@ -17,6 +17,7 @@ KINDS = {
     "fee_reminder": "Fee reminder",
     "welcome": "Welcome",
     "notice": "General notice",
+    "report_card": "Report card",
 }
 CHANNELS = {"email": "Email", "whatsapp": "WhatsApp"}
 PLACEHOLDERS = (
@@ -48,6 +49,11 @@ DEFAULT_TEMPLATES = {
         "Notice from {school_name}",
         "Dear Parent/Guardian of {student_name},\n\n[Write your notice here]\n\n"
         "Best regards,\n{head_name}\n{school_name}",
+    ),
+    "report_card": (
+        "{student_name} – {term_name} report card, {school_name}",
+        "Dear Parent/Guardian of {student_name},\n\nPlease find attached the {term_name} ({session_name}) report "
+        "card for {student_name} ({class_name}).\n\nBest regards,\n{head_name}\n{school_name}",
     ),
 }
 
@@ -267,7 +273,7 @@ def list_birthdays(actor: str, today: date | None = None, days_ahead: int = 7) -
                ORDER BY s.last_name,s.first_name"""
         ).fetchall()
         queued = {r[0] for r in conn.execute(
-            "SELECT dedupe_key FROM communication_messages WHERE status IN ('pending','sent') AND kind='birthday'"
+            "SELECT dedupe_key FROM communication_messages WHERE status IN ('pending','sent','failed') AND kind='birthday'"
         )}
         def entry(row, day):
             born = date.fromisoformat(row["date_of_birth"])
@@ -301,7 +307,7 @@ def list_fee_reminder_candidates(actor: str, today: date | None = None) -> list[
                JOIN fee_invoice_issues x ON x.batch_id=b.id"""
         )]
         queued = {r[0] for r in conn.execute(
-            "SELECT dedupe_key FROM communication_messages WHERE status IN ('pending','sent') AND kind='fee_reminder'"
+            "SELECT dedupe_key FROM communication_messages WHERE status IN ('pending','sent','failed') AND kind='fee_reminder'"
         )}
         result = []
         for student_id in ids:
@@ -330,7 +336,8 @@ def list_fee_reminder_candidates(actor: str, today: date | None = None) -> list[
 
 # ---------------------------------------------------------------- outbox
 
-def queue_messages(kind: str, student_ids: list[int], channel: str, actor: str, today: date | None = None) -> dict:
+def queue_messages(kind: str, student_ids: list[int], channel: str, actor: str, today: date | None = None,
+                   attachments: dict | None = None) -> dict:
     """Compose and store pending messages. Returns ``{"queued": n, "skipped": [{student_id,name,reason}]}``."""
     _kind(kind)
     if channel not in CHANNELS:
@@ -340,6 +347,9 @@ def queue_messages(kind: str, student_ids: list[int], channel: str, actor: str, 
     if any(isinstance(i, bool) or not isinstance(i, int) or i <= 0 for i in student_ids):
         raise ValueError("Select valid students.")
     today = today or date.today()
+    attachments = dict(attachments or {})
+    if any(not isinstance(v, str) or not v or len(v) > 500 for v in attachments.values()):
+        raise ValueError("Attachment paths must be short, non-empty text.")
     queued, skipped = 0, []
     with db.connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -384,17 +394,23 @@ def queue_messages(kind: str, student_ids: list[int], channel: str, actor: str, 
                     skipped.append({"student_id": student_id, "name": name, "reason": "Birthday is not today."})
                     continue
                 variables["age"] = str(today.year - date.fromisoformat(student["date_of_birth"]).year)
-            key = f"{kind}:{student_id}:{today.isoformat()}" if kind in ("birthday", "fee_reminder") else None
+            attachment = attachments.get(student_id)
+            if kind == "report_card" and not attachment:
+                skipped.append({"student_id": student_id, "name": name, "reason": "No report-card PDF was saved."})
+                continue
+            key = (f"{kind}:{student_id}:{today.isoformat()}"
+                   if kind in ("birthday", "fee_reminder", "report_card") else None)
             if key and conn.execute(
-                "SELECT 1 FROM communication_messages WHERE dedupe_key=? AND status IN ('pending','sent')", (key,)
+                "SELECT 1 FROM communication_messages WHERE dedupe_key=? AND status IN ('pending','sent','failed')", (key,)
             ).fetchone():
                 skipped.append({"student_id": student_id, "name": name, "reason": "Already queued today."})
                 continue
             cursor = conn.execute(
                 """INSERT INTO communication_messages(kind,channel,student_id,recipient_name,recipient_contact,
-                                                      subject,body,dedupe_key,created_by) VALUES(?,?,?,?,?,?,?,?,?)""",
+                                                      subject,body,dedupe_key,created_by,attachment_path)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (kind, channel, student_id, name, contact, render_template(subject_t, variables),
-                 render_template(body_t, variables), key, actor),
+                 render_template(body_t, variables), key, actor, attachment),
             )
             db._audit_in_transaction(conn, actor, "QUEUE", "communication_messages", cursor.lastrowid)
             queued += 1
@@ -403,7 +419,7 @@ def queue_messages(kind: str, student_ids: list[int], channel: str, actor: str, 
 
 def list_messages(actor: str, status: str | None = None, kind: str | None = None,
                   starts_on: str | None = None, ends_on: str | None = None, limit: int = 500) -> list[dict]:
-    if status not in (None, "pending", "sent", "cancelled"):
+    if status not in (None, "pending", "sent", "cancelled", "failed"):
         raise ValueError("Choose a valid status.")
     if kind is not None:
         _kind(kind)
@@ -423,7 +439,7 @@ def list_messages(actor: str, status: str | None = None, kind: str | None = None
         _admin(conn, actor)
         rows = conn.execute(
             "SELECT id,kind,channel,student_id,recipient_name,recipient_contact,subject,body,status,created_by,"
-            "created_at,handled_by,handled_at FROM communication_messages"
+            "created_at,handled_by,handled_at,attachment_path,retry_count,last_error FROM communication_messages"
             + (" WHERE " + " AND ".join(where) if where else "")
             + " ORDER BY id DESC LIMIT ?", (*params, limit),
         ).fetchall()
@@ -475,9 +491,9 @@ def requeue_message(message_id: int, actor: str) -> int:
             raise ValueError("The guardian has opted out of communications.")
         cursor = conn.execute(
             """INSERT INTO communication_messages(kind,channel,student_id,recipient_name,recipient_contact,
-                                                  subject,body,created_by) VALUES(?,?,?,?,?,?,?,?)""",
+                                                  subject,body,created_by,attachment_path) VALUES(?,?,?,?,?,?,?,?,?)""",
             (row["kind"], row["channel"], row["student_id"], row["recipient_name"], row["recipient_contact"],
-             row["subject"], row["body"], actor),
+             row["subject"], row["body"], actor, row["attachment_path"]),
         )
         db._audit_in_transaction(conn, actor, "REQUEUE", "communication_messages", cursor.lastrowid)
         return int(cursor.lastrowid)

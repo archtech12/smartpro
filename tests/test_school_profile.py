@@ -63,6 +63,13 @@ def test_school_profile_audit_failure_rolls_back(school_profile_db, monkeypatch)
     assert db.load_school_profile()["school_name"] == ""
 
 
+def test_admission_prefix_is_uppercase_and_partial_profile_save_preserves_it(school_profile_db):
+    db.save_school_profile({"admission_id_prefix": "sch-1"}, "admin")
+    assert db.load_school_profile()["admission_id_prefix"] == "SCH-1"
+    db.save_school_profile({"school_name": "Renamed School"}, "admin")
+    assert db.load_school_profile()["admission_id_prefix"] == "SCH-1"
+
+
 def test_school_logo_is_stored_locally_and_validated(school_profile_db):
     logo = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aocAAAAASUVORK5CYII="
@@ -179,13 +186,6 @@ def test_report_ranking_style_defaults_to_position_and_is_validated(school_profi
         db.save_school_profile({}, "teacher", report_ranking_style="position")
 
 
-def test_admission_prefix_is_uppercase_and_partial_profile_save_preserves_it(school_profile_db):
-    db.save_school_profile({"admission_id_prefix": "sch-1"}, "admin")
-    assert db.load_school_profile()["admission_id_prefix"] == "SCH-1"
-    db.save_school_profile({"school_name": "Renamed School"}, "admin")
-    assert db.load_school_profile()["admission_id_prefix"] == "SCH-1"
-
-
 def test_report_signatures_are_stored_validated_and_removable(school_profile_db):
     db.save_school_profile(
         {"school_name": "Signed"}, "admin", head_signature=PNG_PIXEL, class_teacher_signature=PNG_PIXEL + b"x"
@@ -223,7 +223,7 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
 
     with db.connection() as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-4:] == [24, 25, 26, 27]
+        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-7:] == [23, 24, 25, 26, 27, 28, 29]
         assert "lump_sum_number" in {row[1] for row in conn.execute("PRAGMA table_info(fee_payments)")}
     assert db.load_school_profile()["school_name"] == "Kept School"
     assert db.load_school_profile()["admission_id_prefix"] == "ADM"

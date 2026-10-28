@@ -27,7 +27,7 @@ def test_student_import_accepts_optional_fields_and_skips_blank_lines(tmp_path):
         {" FIRST_NAME ": "", "last_name": "", "gender": "", "guardian_phone": ""},
     ])
     assert preview_student_import(path) == {
-        "row_count": 2,
+        "row_count": 2, "warnings": [],
         "rows": [
             {"admission_no": "", "first_name": "Amina", "last_name": "Okafor", "gender": "Female", "guardian_phone": "555-0101", "nin": "", "date_of_birth": "", "email": ""},
             {"admission_no": "", "first_name": "Musa", "last_name": "Bello", "gender": "", "guardian_phone": "", "nin": "", "date_of_birth": "", "email": ""},
@@ -47,8 +47,7 @@ def test_student_import_accepts_optional_nin_birth_date_and_email(tmp_path):
 
 
 @pytest.mark.parametrize(("headers", "rows", "message"), [
-    (["first_name", "gender"], [{"first_name": "Amina", "gender": "Female"}], "first_name and last_name"),
-    (["first_name", "last_name", "unexpected"], [{"first_name": "Amina", "last_name": "Okafor", "unexpected": "x"}], "not recognized"),
+    (["first_name", "gender"], [{"first_name": "Amina", "gender": "Female"}], "missing required"),
     (["first_name", "last_name", "FIRST_NAME"], [{"first_name": "Amina", "last_name": "Okafor", "FIRST_NAME": "A"}], "duplicate column"),
     (["first_name", "last_name"], [{"first_name": "", "last_name": "Okafor"}], "first name is required"),
     (["first_name", "last_name"], [{"first_name": "A" * 101, "last_name": "Okafor"}], "at most 100 characters"),
@@ -62,27 +61,14 @@ def test_student_import_rejects_invalid_files_without_partial_preview(tmp_path, 
         preview_student_import(path)
 
 
-def test_student_import_splits_full_name_and_preserves_supplied_admission_number(tmp_path):
-    path = tmp_path / "students.csv"
-    _write_csv(path, ["adm_no", "student name", "sex", "phone"], [
-        {"adm_no": "OLD-001", "student name": "Amina Mary Okafor", "sex": "Female", "phone": "555-0101"},
+def test_student_import_supports_full_name_and_preserves_optional_admission_id(tmp_path):
+    path = tmp_path / "roster.csv"
+    _write_csv(path, ["Student ID", "Student Name", "Gender"], [
+        {"Student ID": "SCH-2026-10", "Student Name": "Amina Okafor", "Gender": "F"},
+        {"Student ID": "", "Student Name": "Musa Bello", "Gender": "M"},
     ])
-    row = preview_student_import(path)["rows"][0]
-    assert row["admission_no"] == "OLD-001"
-    assert row["first_name"] == "Amina"
-    assert row["last_name"] == "Mary Okafor"
-    assert row["gender"] == "Female"
-
-
-def test_student_import_excel_workbook_supports_full_name_and_optional_id(tmp_path):
-    from smartschool.spreadsheet_files import write_rows
-
-    path = tmp_path / "students.xlsx"
-    write_rows(path, ["student_id", "full_name", "gender", "email"], [
-        ["KEEP-001", "Amina Okafor", "Female", "amina@example.org"],
-        [None, "Musa Bello", None, None],
-    ])
-    rows = preview_student_import(path)["rows"]
-    assert rows[0]["admission_no"] == "KEEP-001"
-    assert (rows[0]["first_name"], rows[0]["last_name"]) == ("Amina", "Okafor")
-    assert rows[1]["admission_no"] == ""
+    result = preview_student_import(path)
+    assert result["rows"] == [
+        {"admission_no": "SCH-2026-10", "first_name": "Amina", "last_name": "Okafor", "gender": "Female", "guardian_phone": "", "nin": "", "date_of_birth": "", "email": ""},
+        {"admission_no": "", "first_name": "Musa", "last_name": "Bello", "gender": "Male", "guardian_phone": "", "nin": "", "date_of_birth": "", "email": ""},
+    ]

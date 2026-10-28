@@ -1,21 +1,24 @@
-"""Validated CSV/XLSX templates and previews for draft assessment score entry."""
+"""Validated CSV templates and previews for draft assessment score entry."""
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 
+from . import tabular
 from .database import validate_assessment_score
-from .spreadsheet_files import read_rows, write_rows
 
 
 def _column_code(value: object) -> str:
+    """Convert a subject or component label into a compact spreadsheet column code."""
     return re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
 
 
 def _component_headers(components: list[dict], subject_code: str) -> dict[int, str]:
     subject = _column_code(subject_code) or "SUBJECT"
-    headers, used = {}, set()
+    headers = {}
+    used = set()
     for component in components:
         name = _column_code(component.get("component_name"))
         name = re.sub(r"_(SCORE|MARKS?)$", "", name) or f"COMPONENT_{int(component['id'])}"
@@ -27,26 +30,53 @@ def _component_headers(components: list[dict], subject_code: str) -> dict[int, s
     return headers
 
 
+def _safe_spreadsheet_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + text
+    return text
+
+
 def write_score_template(
     path: str | Path, students: list[dict], components: list[dict], subject_code: str = "SUBJECT"
 ) -> None:
-    """Write roster IDs, readable names and current component scores to CSV/XLSX."""
+    """Write the current class roster and any scores currently displayed in the editor."""
     if not components:
         raise ValueError("Assessment components are not configured.")
     component_headers = _component_headers(components, subject_code)
     headers = ["admission_no", "student_name"] + list(component_headers.values())
-    rows = []
-    for student in students:
-        name = " ".join(str(student.get(field, "")).strip() for field in ("first_name", "last_name") if student.get(field))
-        scores = student.get("scores", {})
-        rows.append([student.get("admission_no", ""), name] + [scores.get(component_id, "") or "" for component_id in component_headers])
-    write_rows(path, headers, rows)
+    if Path(path).suffix.lower() == ".xlsx":
+        rows = []
+        for student in students:
+            scores = student.get("scores", {})
+            rows.append(
+                [student.get("admission_no", ""), f"{student.get('first_name', '')} {student.get('last_name', '')}".strip()]
+                + [scores.get(int(component["id"]), "") or "" for component in components]
+            )
+        tabular.write_workbook(path, [{"name": "Scores", "headers": headers, "rows": rows}])
+        return
+    with Path(path).open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        for student in students:
+            row = {
+                "admission_no": _safe_spreadsheet_text(student.get("admission_no", "")),
+                "student_name": _safe_spreadsheet_text(f"{student.get('first_name', '')} {student.get('last_name', '')}".strip()),
+            }
+            scores = student.get("scores", {})
+            for component in components:
+                row[component_headers[int(component["id"])]] = scores.get(int(component["id"]), "") or ""
+            writer.writerow(row)
 
 
 def preview_score_import(
     path: str | Path, students: list[dict], components: list[dict], subject_code: str = "SUBJECT"
 ) -> dict:
-    """Validate all scores before changing draft values; admission number is the roster key."""
+    """Validate a whole score file without changing any application or database state.
+
+    Admission number is the only roster key. Blank score cells are omitted from the
+    returned updates, so importing a partially filled file cannot erase existing marks.
+    """
     if not components:
         raise ValueError("Assessment components are not configured.")
     roster = {}
@@ -56,51 +86,67 @@ def preview_score_import(
             raise ValueError("The selected class roster has missing or duplicate admission numbers.")
         roster[key] = student
 
-    headers, source_rows = read_rows(path)
-    normalized = [str(header or "").strip().casefold() for header in headers]
-    aliases = {"student_id": "admission_no", "adm_no": "admission_no", "student name": "student_name", "name": "student_name"}
-    normalized = [aliases.get(header, header) for header in normalized]
-    if len(normalized) != len(set(normalized)):
-        raise ValueError("The score file contains duplicate column headings.")
     component_headers = _component_headers(components, subject_code)
-    normalized_component_headers = {header.casefold(): component_id for component_id, header in component_headers.items()}
-    required = {"admission_no", *normalized_component_headers}
-    if "student_name" not in normalized and not {"first_name", "last_name"} <= set(normalized):
-        raise ValueError("The score file must include student_name or first_name and last_name columns.")
-    missing = required - set(normalized)
-    expected = required | {"student_name", "first_name", "last_name"}
-    unknown = set(normalized) - expected
+    component_names = list(component_headers.values())
+    component_by_header = {
+        component_headers[int(component["id"])]: component for component in components
+    }
+    table = tabular.read_table(path)
+    header_index = next((i for i, row in enumerate(table) if any(row)), None)
+    if header_index is None:
+        raise ValueError("The file is empty or has no heading row.")
+    headers = [h.strip() for h in table[header_index]]
+    while headers and not headers[-1]:
+        headers.pop()
+    lookup = {h.casefold(): i for i, h in enumerate(headers) if h}
+    if len(lookup) != len([h for h in headers if h]):
+        raise ValueError("The file contains duplicate column headings.")
+    name_columns = (
+        ["student_name"] if "student_name" in lookup
+        else ["first_name", "last_name"] if "first_name" in lookup and "last_name" in lookup
+        else []
+    )
+    expected = ["admission_no", *name_columns, *component_names]
+    missing = [header for header in expected if header.casefold() not in lookup]
+    if not name_columns:
+        missing.append("student_name (or first_name and last_name)")
+    accepted = {e.casefold() for e in expected}
+    unknown = [h for h in headers if h and h.casefold() not in accepted]
     if missing or unknown:
         details = []
         if missing:
-            details.append("missing: " + ", ".join(sorted(missing)))
+            details.append("missing: " + ", ".join(missing))
         if unknown:
-            details.append("unexpected: " + ", ".join(sorted(unknown)))
-        raise ValueError("Score columns do not match this class, subject, and term (" + "; ".join(details) + ").")
+            details.append("unexpected: " + ", ".join(unknown))
+        raise ValueError("The columns do not match this class, subject, and term (" + "; ".join(details) + "). Export the template again.")
 
-    column_headers = dict(zip(headers, normalized))
-    component_by_header = {header.casefold(): next(item for item in components if int(item["id"]) == component_id)
-                           for header, component_id in normalized_component_headers.items()}
-    updates, seen = {}, set()
-    score_count = matched_rows = 0
-    for line_number, source in enumerate(source_rows, start=2):
-        row = {column_headers[header]: (source.get(header) or "").strip() for header in headers}
-        if not any(row.values()):
+    def cell(cells, header):
+        position = lookup[header.casefold()]
+        return cells[position].strip() if position < len(cells) else ""
+
+    updates = {}
+    seen = set()
+    score_count = 0
+    matched_rows = 0
+    for line_number, cells in enumerate(table[header_index + 1:], start=header_index + 2):
+        if not any(c.strip() for c in cells):
             continue
-        admission_no = row.get("admission_no", "").strip()
+        admission_no = cell(cells, "admission_no")
         key = admission_no.casefold()
         if not key:
-            raise ValueError(f"Row {line_number} has scores but no student ID/admission number.")
+            raise ValueError(f"Row {line_number} has scores but no admission number.")
         if key in seen:
             raise ValueError(f"Admission number {admission_no!r} appears more than once.")
         student = roster.get(key)
         if student is None:
-            raise ValueError(f"Admission number {admission_no!r} on row {line_number} is not in the selected class roster.")
+            raise ValueError(
+                f"Admission number {admission_no!r} on row {line_number} is not in the selected class roster."
+            )
         seen.add(key)
         matched_rows += 1
         student_updates = {}
         for header, component in component_by_header.items():
-            value = row.get(header, "").strip()
+            value = cell(cells, header)
             if value:
                 try:
                     student_updates[int(component["id"])] = validate_assessment_score(value, component["max_score"])
@@ -109,6 +155,7 @@ def preview_score_import(
         if student_updates:
             updates[int(student["enrollment_id"])] = student_updates
             score_count += len(student_updates)
+
     if not updates:
         raise ValueError("No non-blank scores were found. Nothing was imported.")
     return {"updates": updates, "matched_rows": matched_rows, "score_count": score_count}

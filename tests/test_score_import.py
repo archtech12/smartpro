@@ -109,7 +109,7 @@ def test_score_template_neutralizes_spreadsheet_formulas(tmp_path):
 
 
 def test_excel_score_template_uses_id_name_ca_exam_headers_and_imports_scores(tmp_path):
-    from smartschool.spreadsheet_files import read_rows, write_rows
+    from smartschool.tabular import read_table, write_workbook
 
     path = tmp_path / "scores.xlsx"
     components = [
@@ -117,10 +117,12 @@ def test_excel_score_template_uses_id_name_ca_exam_headers_and_imports_scores(tm
         {"id": 9, "component_name": "Exam Score", "max_score": "60"},
     ]
     write_score_template(path, _students(), components, "MTH")
-    headers, rows = read_rows(path)
+    table = read_table(path)
+    headers = table[0]
+    rows = [dict(zip(headers, values)) for values in table[1:]]
     assert headers == ["admission_no", "student_name", "MTH_CA", "MTH_EXAM"]
     assert rows[0]["admission_no"] == "A-001"
     assert rows[0]["student_name"] == "Amina One"
-    write_rows(path, headers, [["A-001", "Amina One", "32", "55"]])
+    write_workbook(path, [{"name": "Scores", "headers": headers, "rows": [["A-001", "Amina One", "32", "55"]]}])
     result = preview_score_import(path, _students(), components, "MTH")
     assert result["updates"] == {21: {4: "32", 9: "55"}}

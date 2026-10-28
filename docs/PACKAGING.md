@@ -51,3 +51,8 @@ To move to a new PC, copy that folder (or use the app's Data backup page) and re
 A one-file PyInstaller build unpacks itself to a temp folder on every start (slower, and
 often flagged by antivirus). A proper installer with a one-folder app starts faster and
 supports upgrades, shortcuts and uninstall.
+
+## Activation keys
+Before the release build, set up the licence key pair and paste the public key into `smartschool/license_public_key.py`
+(see `docs/LICENSING.md`). `build_windows.ps1` warns when no public key is set, because such a build starts without
+asking for an activation key. `tools/license_keygen.py` is vendor-only and is not included in the installer.

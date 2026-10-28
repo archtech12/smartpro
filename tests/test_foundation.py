@@ -323,10 +323,12 @@ def test_csv_export_neutralizes_spreadsheet_formulas(isolated_db, tmp_path):
     assert row["last_name"] == "'@SUM(A1:A2)"
     assert row["guardian_phone"] == "'+123456"
 
-    from smartschool.spreadsheet_files import read_rows
+    from smartschool.tabular import read_table
     excel_path = tmp_path / "students.xlsx"
-    db.export_csv("Students", str(excel_path))
-    headers, excel_rows = read_rows(excel_path)
+    db.export_module_xlsx("Students", str(excel_path))
+    table = read_table(excel_path)
+    headers = table[0]
+    excel_rows = [dict(zip(headers, values)) for values in table[1:]]
     assert headers[0] == "admission_no"
     assert excel_rows[0]["admission_no"] == "A-1"
     assert excel_rows[0]["first_name"].startswith("'=")
