@@ -862,7 +862,7 @@ def _migration_27(conn: sqlite3.Connection) -> None:
 def _migration_28(conn: sqlite3.Connection) -> None:
     """Computer-based tests: questions, exams, student attempts and answers."""
     conn.execute(
-        """CREATE TABLE cbt_questions(
+        """CREATE TABLE IF NOT EXISTS cbt_questions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subject_id INTEGER REFERENCES subjects(id) ON DELETE RESTRICT,
             qtype TEXT NOT NULL CHECK(qtype IN ('mcq','true_false','short_answer')),
@@ -877,7 +877,7 @@ def _migration_28(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
     )
     conn.execute(
-        """CREATE TABLE cbt_exams(
+        """CREATE TABLE IF NOT EXISTS cbt_exams(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 120),
             class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE RESTRICT,
@@ -894,16 +894,16 @@ def _migration_28(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
     )
-    conn.execute("CREATE UNIQUE INDEX idx_cbt_exams_open_code ON cbt_exams(access_code COLLATE NOCASE) WHERE status='open'")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cbt_exams_open_code ON cbt_exams(access_code COLLATE NOCASE) WHERE status='open'")
     conn.execute(
-        """CREATE TABLE cbt_exam_questions(
+        """CREATE TABLE IF NOT EXISTS cbt_exam_questions(
             exam_id INTEGER NOT NULL REFERENCES cbt_exams(id) ON DELETE CASCADE,
             question_id INTEGER NOT NULL REFERENCES cbt_questions(id) ON DELETE RESTRICT,
             position INTEGER NOT NULL CHECK(position>=1),
             PRIMARY KEY(exam_id,question_id))"""
     )
     conn.execute(
-        """CREATE TABLE cbt_attempts(
+        """CREATE TABLE IF NOT EXISTS cbt_attempts(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             exam_id INTEGER NOT NULL REFERENCES cbt_exams(id) ON DELETE RESTRICT,
             student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
@@ -918,10 +918,10 @@ def _migration_28(conn: sqlite3.Connection) -> None:
             client_ip TEXT NOT NULL DEFAULT '' CHECK(length(client_ip)<=60),
             auto_submitted INTEGER NOT NULL DEFAULT 0 CHECK(auto_submitted IN (0,1)))"""
     )
-    conn.execute("CREATE UNIQUE INDEX idx_cbt_attempts_live ON cbt_attempts(exam_id,student_id) WHERE status<>'voided'")
-    conn.execute("CREATE INDEX idx_cbt_attempts_exam ON cbt_attempts(exam_id,status)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cbt_attempts_live ON cbt_attempts(exam_id,student_id) WHERE status<>'voided'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cbt_attempts_exam ON cbt_attempts(exam_id,status)")
     conn.execute(
-        """CREATE TABLE cbt_answers(
+        """CREATE TABLE IF NOT EXISTS cbt_answers(
             attempt_id INTEGER NOT NULL REFERENCES cbt_attempts(id) ON DELETE CASCADE,
             question_id INTEGER NOT NULL REFERENCES cbt_questions(id) ON DELETE RESTRICT,
             answer TEXT NOT NULL CHECK(length(answer)<=500),
