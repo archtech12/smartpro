@@ -212,7 +212,7 @@ def test_v22_database_upgrades_to_report_settings_and_lump_sum_without_losing_da
 
     with db.connection() as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-5:] == [23, 24, 25, 26, 27]
+        assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")][-6:] == [23, 24, 25, 26, 27, 28]
         assert "lump_sum_number" in {row[1] for row in conn.execute("PRAGMA table_info(fee_payments)")}
     assert db.load_school_profile()["school_name"] == "Kept School"
     assert db.load_school_logo() == PNG_PIXEL

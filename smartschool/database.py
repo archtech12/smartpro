@@ -30,7 +30,7 @@ def configured_data_dir() -> Path:
 
 APP_DIR = configured_data_dir()
 DB_PATH = APP_DIR / "school.db"
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 # Bound foreground-worker waits when another process holds a long SQLite lock.
 SQLITE_BUSY_TIMEOUT_SECONDS = 2
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
@@ -859,6 +859,79 @@ def _migration_27(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA user_version = 27")
 
 
+def _migration_28(conn: sqlite3.Connection) -> None:
+    """Computer-based tests: questions, exams, student attempts and answers."""
+    conn.execute(
+        """CREATE TABLE cbt_questions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_id INTEGER REFERENCES subjects(id) ON DELETE RESTRICT,
+            qtype TEXT NOT NULL CHECK(qtype IN ('mcq','true_false','short_answer')),
+            prompt TEXT NOT NULL CHECK(length(trim(prompt)) BETWEEN 1 AND 2000),
+            options_json TEXT NOT NULL DEFAULT '[]' CHECK(length(options_json)<=4000),
+            answer TEXT NOT NULL CHECK(length(answer) BETWEEN 1 AND 1000),
+            marks INTEGER NOT NULL DEFAULT 1 CHECK(marks BETWEEN 1 AND 100),
+            explanation TEXT NOT NULL DEFAULT '' CHECK(length(explanation)<=1000),
+            is_archived INTEGER NOT NULL DEFAULT 0 CHECK(is_archived IN (0,1)),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute(
+        """CREATE TABLE cbt_exams(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 120),
+            class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE RESTRICT,
+            subject_id INTEGER REFERENCES subjects(id) ON DELETE RESTRICT,
+            academic_session_id INTEGER NOT NULL REFERENCES academic_sessions(id) ON DELETE RESTRICT,
+            duration_minutes INTEGER NOT NULL CHECK(duration_minutes BETWEEN 1 AND 300),
+            access_code TEXT NOT NULL CHECK(length(access_code) BETWEEN 4 AND 12),
+            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','open','closed')),
+            shuffle_questions INTEGER NOT NULL DEFAULT 1 CHECK(shuffle_questions IN (0,1)),
+            shuffle_options INTEGER NOT NULL DEFAULT 1 CHECK(shuffle_options IN (0,1)),
+            show_score INTEGER NOT NULL DEFAULT 0 CHECK(show_score IN (0,1)),
+            instructions TEXT NOT NULL DEFAULT '' CHECK(length(instructions)<=1000),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute("CREATE UNIQUE INDEX idx_cbt_exams_open_code ON cbt_exams(access_code COLLATE NOCASE) WHERE status='open'")
+    conn.execute(
+        """CREATE TABLE cbt_exam_questions(
+            exam_id INTEGER NOT NULL REFERENCES cbt_exams(id) ON DELETE CASCADE,
+            question_id INTEGER NOT NULL REFERENCES cbt_questions(id) ON DELETE RESTRICT,
+            position INTEGER NOT NULL CHECK(position>=1),
+            PRIMARY KEY(exam_id,question_id))"""
+    )
+    conn.execute(
+        """CREATE TABLE cbt_attempts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exam_id INTEGER NOT NULL REFERENCES cbt_exams(id) ON DELETE RESTRICT,
+            student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+            status TEXT NOT NULL DEFAULT 'in_progress' CHECK(status IN ('in_progress','submitted','voided')),
+            seed INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            deadline_at TEXT NOT NULL,
+            submitted_at TEXT,
+            score INTEGER,
+            max_score INTEGER,
+            focus_losses INTEGER NOT NULL DEFAULT 0 CHECK(focus_losses>=0),
+            client_ip TEXT NOT NULL DEFAULT '' CHECK(length(client_ip)<=60),
+            auto_submitted INTEGER NOT NULL DEFAULT 0 CHECK(auto_submitted IN (0,1)))"""
+    )
+    conn.execute("CREATE UNIQUE INDEX idx_cbt_attempts_live ON cbt_attempts(exam_id,student_id) WHERE status<>'voided'")
+    conn.execute("CREATE INDEX idx_cbt_attempts_exam ON cbt_attempts(exam_id,status)")
+    conn.execute(
+        """CREATE TABLE cbt_answers(
+            attempt_id INTEGER NOT NULL REFERENCES cbt_attempts(id) ON DELETE CASCADE,
+            question_id INTEGER NOT NULL REFERENCES cbt_questions(id) ON DELETE RESTRICT,
+            answer TEXT NOT NULL CHECK(length(answer)<=500),
+            answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(attempt_id,question_id))"""
+    )
+    conn.execute("INSERT INTO schema_migrations(version) VALUES(28)")
+    conn.execute("PRAGMA user_version = 28")
+
+
 def initialize() -> None:
     """Apply known migrations; an existing DB is backed up before its first migration."""
     existed = DB_PATH.exists() and DB_PATH.stat().st_size > 0
@@ -925,6 +998,8 @@ def initialize() -> None:
                 _migration_26(conn)
             elif next_version == 27:
                 _migration_27(conn)
+            elif next_version == 28:
+                _migration_28(conn)
             else:
                 raise sqlite3.DatabaseError(f"No migration is defined for schema {next_version}")
             conn.commit()
