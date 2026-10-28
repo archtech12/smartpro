@@ -556,3 +556,15 @@ def export_results_xlsx(actor, exam_id, path: str) -> str:
     tabular.write_workbook(path, [{"name": "Results", "headers": rows[0], "rows": rows[1:],
                                    "text_columns": ["Admission No"]}])
     return str(path)
+
+
+def form_options(actor) -> dict:
+    """Choices for the exam and question forms."""
+    with db.connection() as conn:
+        _admin(conn, actor)
+        classes = [(r["id"], r["label"]) for r in conn.execute(
+            "SELECT id,class_name||CASE WHEN section<>'' THEN ' '||section ELSE '' END AS label FROM classes ORDER BY class_name,section")]
+        sessions = [(r["id"], r["name"], bool(r["is_current"])) for r in conn.execute(
+            "SELECT id,name,is_current FROM academic_sessions ORDER BY starts_on DESC")]
+        subjects = [(r["id"], r["subject_name"]) for r in conn.execute("SELECT id,subject_name FROM subjects ORDER BY subject_name")]
+    return {"classes": classes, "sessions": sessions, "subjects": subjects}

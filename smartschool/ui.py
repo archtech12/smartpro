@@ -27,6 +27,7 @@ from .settings_ui import SchoolProfilePage
 from .user_accounts_ui import UserAccountsPage
 from .diagnostics_ui import DiagnosticsPage
 from .fees_ui import FeeInvoicePage, FeeReconciliationPage, FeeSetupPage
+from .cbt_ui import CBTCenterPage
 from .communication_ui import CommunicationCenterPage
 from .security_ui import AuditLogPage, ChangePasswordDialog
 from .security import hash_password, verify_password
@@ -1605,7 +1606,7 @@ class MainWindow(QMainWindow):
             tab_specs = [("Main", ["Dashboard", "Grade Entry", "Attendance"])]
         else:
             tab_specs = [
-                ("Main", ["Dashboard", *db.MODULES.keys(), "Enrollments", "Grade Entry", "Attendance", "Timetable", "Fee Invoices", "Transaction History", "Communication Center"]),
+                ("Main", ["Dashboard", *db.MODULES.keys(), "Enrollments", "Grade Entry", "Attendance", "Timetable", "Fee Invoices", "Transaction History", "Communication Center", "CBT Center"]),
                 ("Settings", ["School Profile", "Academic Calendar", "Legacy Class Review", "Class Stages", "Class Subjects", "Grade Bands", "Assessment Setup", "Fee Setup", "User Accounts", "Audit Log", "Data Backup", "Database Diagnostics"]),
             ]
         for tab_index, (tab_name, page_names) in enumerate(tab_specs):
@@ -1763,6 +1764,8 @@ class MainWindow(QMainWindow):
             page.refresh()
         elif name == "Communication Center" and not created_now:
             page.refresh()
+        elif name == "CBT Center" and not created_now:
+            page.refresh()
         elif name == "Audit Log" and not created_now:
             page.refresh()
 
@@ -1783,6 +1786,8 @@ class MainWindow(QMainWindow):
             return AuditLogPage(self.user["username"], self.user["role"])
         if name == "Communication Center":
             return CommunicationCenterPage(self.user["username"], self.user["role"])
+        if name == "CBT Center":
+            return CBTCenterPage(self.user["username"], self.user["role"])
         if name in db.MODULES:
             return ModulePage(name, self.user["username"])
         if name == "Academic Calendar":

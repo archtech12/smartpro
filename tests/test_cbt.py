@@ -200,3 +200,10 @@ def test_v27_database_upgrades_with_cbt_tables(school):
     with db.connection() as conn:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"cbt_questions", "cbt_exams", "cbt_exam_questions", "cbt_attempts", "cbt_answers"} <= tables
+
+
+def test_form_options_lists_classes_sessions_subjects(school):
+    options = cbt.form_options("admin")
+    assert len(options["classes"]) == 3 and options["sessions"][0][2] is True
+    with pytest.raises(PermissionError):
+        cbt.form_options("teacher")
