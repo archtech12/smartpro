@@ -17,6 +17,11 @@ Write-Host "==> Running tests (the build stops if any fail)"
 & $py -m pytest -q
 if ($LASTEXITCODE -ne 0) { throw "Tests failed - installer not built." }
 
+$enforced = (& $py -c "from smartschool import licensing; print(licensing.is_enforced())").Trim()
+if ($enforced -ne "True") {
+    Write-Warning "No licence public key is set (smartschool\license_public_key.py): this build will NOT ask for an activation key. See docs\LICENSING.md."
+}
+
 Write-Host "==> Building the application folder with PyInstaller"
 & $py -m PyInstaller packaging\SmartSchoolManager.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
